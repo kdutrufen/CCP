@@ -1,0 +1,242 @@
+---
+title: "motif_PRG_Olha_Pyko"
+author: "Carlos Eduardo Madureira Trufen"
+date: "2023-10-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r}
+# library(biomartr)
+library(Biostrings)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(memes)
+library(MotifDb)
+library(org.Mm.eg.db)
+library(rtracklayer)
+library(tictoc)
+library(tidyverse)
+
+library(foreach)
+library(doParallel)
+
+path_to_files <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/motif_ZNF644_12nt_Olha_Pyko/"
+path_to_data <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/motif_ER1_Olha_Pyko/"
+```
+
+# Load fimo results
+```{r}
+fimo_files <- list.files(path = path_to_files, pattern = "fimo_out")
+
+motif_data_list <- purrr::map(seq_along(fimo_files), function(i){
+  read_delim(paste0(path_to_files, fimo_files[i], "/fimo.tsv"), 
+     delim = "\t", escape_double = FALSE, 
+     trim_ws = TRUE)})
+
+motif_data_list <- motif_data_list %>% purrr::set_names(fimo_files %>% str_remove_all(pattern = "human_|_fimo_out"))
+```
+
+# Load human genome df files
+```{r}
+human_genome_df_list <- qs::qread(file = paste0(path_to_data, "human_genome_df_list.qs"), nthreads = 50)
+```
+
+# Load human gff files
+```{r}
+gff_files_list <- list.files(path = paste0(path_to_data, "human_chr_gff"), pattern = "human")
+```
+
+# Find overlaps
+```{r}
+# find_overlaps_parallel <- function(motif_df, gff_df) {
+find_overlaps <- function(motif_df, gff_df) {  
+  
+  # Remove chromosome data
+  gff_df <- gff_df %>% dplyr::filter(is.na(genome))
+  
+  # Create a list of overlaps
+  overlaps_list <- foreach(i = seq_along(motif_df[["start"]]), .combine = rbind) %dopar% {
+    
+    motif_start <- motif_df[["start"]][i]
+    motif_end <- motif_df[["stop"]][i]
+
+    overlaps_chr <- gff_df[gff_df[["start"]] <= motif_end &
+                                     gff_df[["end"]] >= motif_start, ]
+
+    overlaps_chr <- overlaps_chr[overlaps_chr[["type"]] == "gene", ]
+
+    if (length(overlaps_chr[["Name"]]) == 1) {
+      overlaps <- overlaps_chr[["Name"]]
+    } else if (length(overlaps_chr[["Name"]]) > 1) {
+      overlaps <- paste(overlaps_chr[["Name"]], collapse = ", ")
+    } else {
+      overlaps <- "NA"
+    }
+
+    return(overlaps)
+  }
+
+  # Convert the list of overlaps to a vector
+  overlaps_v <- unlist(overlaps_list)
+
+  # Add the overlaps column to the motif_df dataframe
+  motif_df <- motif_df %>% mutate(overlaps = overlaps_v)
+  
+  return(motif_df)
+}
+
+chr_names <- gff_files_list %>% str_extract(pattern = "chr_[0-9][0-9]|chr_[0-9]|chr_[A-Z]")
+
+library(foreach)
+library(doParallel)
+  
+  # Register a parallel backend
+cores <- detectCores()
+  
+cl <- makeCluster(cores - 1)
+  
+# Register the backend with foreach
+  registerDoParallel(cl)
+
+motif_data_overlaps_list <- list()
+tic()
+for(i in chr_names[13:24]){
+# for(i in seq_along(chr_names)){
+    print(chr_names[i])
+    
+    motif_name <- paste0(chr_names[i], "_ZNF644_simple")
+    
+    motif_data_overlaps_list[[motif_name]] <- find_overlaps(  
+      motif_df = motif_data_list[[motif_name]], 
+      gff_df = human_genome_df_list[[chr_names[i]]]
+      )
+    
+    # motif_data_list[[motif_name]] %>% qs::qsave(file = paste0(path_to_files, "motif_data_overlaps_list_", motif_name, ".qs" ), nthreads = 50)
+    }
+toc()
+
+# Stop the cluster
+stopCluster(cl)
+
+motif_data_overlaps_list <- motif_data_list
+
+motif_data_overlaps_df <- motif_data_overlaps_list %>% bind_rows(.id = "chr")
+
+# motif_data_overlaps_list %>% qs::qsave(file = paste0(path_to_files, "human_PRG_motif_data_list_with_overlaps.qs"), nthreads = 50)
+motif_data_overlaps_list <- qs::qread(file = paste0(path_to_files, "human_PRG_motif_data_list_with_overlaps.qs"), nthreads = 50)
+
+# motif_data_overlaps_df %>% qs::qsave(file = paste0(path_to_data, "human_PRG_motif_df_with_overlaps.qs"), nthreads = 50)
+motif_data_overlaps_df <- qs::qread(file = paste0(path_to_data, "human_PRG_motif_df_with_overlaps.qs"), nthreads = 50)
+
+```
+
+# Find nearest neighbor
+```{r}
+gff_files_list <- list.files(path = paste0(path_to_files, "human_chr_gff"), pattern = "human")
+
+human_genome_df_list <- qs::qread(file = paste0(path_to_files, "human_genome_df_list.qs"), nthreads = 50)
+
+motif_data_overlaps_list <- qs::qread(file = paste0(path_to_data, "human_PRG_motif_data_list_with_overlaps.qs"), nthreads = 50)
+
+motif_data_overlaps_list <- motif_data_overlaps_list %>% purrr::map(function(x) x %>% mutate(overlaps = overlaps %>% as.character()))
+
+motif_data_overlaps_list <- motif_data_overlaps_list %>% purrr::map(drop_na, start)
+
+find_nearest_neighbor <- function(motif_df, gff_df){
+
+  nearest_gene_list <- list()
+  
+  # Find nearest gene for each motif
+  nearest_gene_list <- purrr::map(seq_along(motif_df$start), function(i) {
+  
+    # print(i)
+    # Get motif position
+    pos <- motif_df$start[i]
+    
+    # Find distance to closest gene
+    dists <- abs(gff_df$start - pos)
+    min_dist <- min(dists)
+    
+    # Return gene with minimum distance
+    return(gff_df$ID[which.min(dists)])
+    
+    })
+  
+  nearest_gene_v <- nearest_gene_list %>% unlist()
+  
+  motif_df <- motif_df %>% mutate(nearest_gene = nearest_gene_v)
+
+  return(motif_df)
+}
+
+chr_names <- gff_files_list %>% str_extract(pattern = "chr_[0-9][0-9]|chr_[0-9]|chr_[A-Z]")
+
+library(foreach)
+library(doParallel)
+
+# Register a parallel backend
+cores <- detectCores()
+  
+cl <- makeCluster(cores - 1)
+
+# Register the backend with foreach
+registerDoParallel(cl)
+
+motif_overlap_overlap_nearest_neighbor_data_list <- list()
+
+tic()
+for(i in seq_along(chr_names)){
+    print(chr_names[i])
+    
+    motif_name <- paste0(chr_names[i], "_ZNF644_simple")
+    
+    # find_overlaps_parallel(
+    motif_overlap_overlap_nearest_neighbor_data_list[[motif_name]] <- find_nearest_neighbor(  
+      motif_df = motif_data_overlaps_list[[motif_name]], 
+      gff_df = human_genome_df_list[[chr_names[i]]]
+      )
+    
+    # motif_overlap_overlap_nearest_neighbor_data_list[[motif_name]] %>% 
+    #   qs::qsave(file = paste0(path_to_data, "motif_data_overlap_nearest_neighbor_list_", motif_name, ".qs" ), nthreads = 50)
+    }
+toc()
+
+
+# Stop the cluster
+stopCluster(cl)
+
+# motif_data_list <- motif_data_list %>% purrr::set_names(chr_nt)
+
+# motif_data_overlap_nearest_neighbor_files <- list.files(path = path_to_data, pattern = "motif_data_overlap_nearest_neighbor_list_chr_.*.qs", full.names = TRUE)
+# 
+# chr_nt <- list.files(path = path_to_data, pattern = "motif_data_overlap_nearest_neighbor_list_chr_.*.qs") %>% 
+#   str_remove(pattern = "motif_data_overlap_nearest_neighbor_list_") %>% 
+#   str_remove(pattern = ".qs")
+# 
+# motif_data_overlap_nearest_neighbor_list <-  purrr::map(seq_along(motif_data_overlap_nearest_neighbor_files), function(i) {
+#   print(i)
+#   qs::qread(file = motif_data_overlap_nearest_neighbor_files[i], nthreads = 50)
+#   })
+
+# motif_data_overlap_nearest_neighbor_list <- motif_data_overlap_nearest_neighbor_list %>% purrr::set_names(chr_nt)
+
+motif_overlap_overlap_nearest_neighbor_data_df <- motif_overlap_overlap_nearest_neighbor_data_list %>% bind_rows(.id = "chr")
+
+motif_overlap_overlap_nearest_neighbor_data_list %>% qs::qsave(file = paste0(path_to_files, "human_ZNF_simple_motif_data_list_with_overlap_nearest_neighbor.qs"), nthreads = 50)
+# motif_data_overlap_nearest_neighbor_list <- qs::qread(file = paste0(path_to_data, "human_ZNF_simple_motif_data_list_with_overlap_nearest_neighbor.qs"), nthreads = 50)
+
+motif_overlap_overlap_nearest_neighbor_data_df %>% vroom::vroom_write(file = paste0(path_to_files, "human_ZNF_simple_motif_df_with_overlap_nearest_neighbor.tsv"), delim = "\t", num_threads = 50)
+# motif_data_overlap_nearest_neighbor_df <- vroom::vroom(file = paste0(path_to_data, "human_ZNF_simple_motif_df_with_overlap_nearest_neighbor.tsv"), delim = "\t", num_threads = 50)
+
+```
+
+
+

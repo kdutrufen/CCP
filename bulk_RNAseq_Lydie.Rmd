@@ -1,0 +1,3136 @@
+---
+title: "RNASeq_Institute_Physiology"
+author: "Carlos Eduardo Madureira Trufen"
+date: "2022-09-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r}
+# library(biomaRt)
+library(clusterProfiler)
+library(cowplot)
+library(data.table)
+# library(DESeq2)
+library(edgeR)
+# library(GeneBook)
+library(ggeasy)
+library(ggfortify)
+library(ggwordcloud)
+library(KEGGREST)
+# library(mmtable2)
+library(msigdbr)
+library(org.Rn.eg.db)
+library(org.Mm.eg.db)
+library(patchwork)
+library(pathview)
+library(readr)
+library(readxl)
+library(RColorBrewer)
+library(RUVSeq)
+library(tictoc)
+library(tidyverse)
+library(VennDiagram)
+```
+
+# functions
+```{r}
+plot_heatmap_and_dendro <- function(df) {
+  library(ggdendro)
+  library(tidyverse)
+
+  sample_names <- names(df)
+  # Calculate the dendrogram
+  dend <- df %>%
+    # column_to_rownames(var = "Gene") %>%
+    as.matrix() %>%
+    dist() %>%
+    hclust() %>%
+    as.dendrogram()
+  
+  dend_data <- dend %>% dendro_data()
+
+  # Setup the data, so that the layout is inverted (this is more
+  # "clear" than simply using coord_flip())
+  segment_data <- with(
+    segment(dend_data),
+    data.frame(x = y, y = x, xend = yend, yend = xend)
+  )
+
+  # Use the dendrogram label data to position the gene labels
+  gene_pos_table <- with(
+    dend_data$labels,
+    data.frame(y_center = x, Gene = as.character(label), height = 1)
+  )
+
+  # Table to position the samples
+  sample_pos_table <- data.frame(Sample = sample_names) %>%
+    mutate(x_center = (1:nrow(.)), width = 1)
+
+  # Neglecting the gap parameters
+  heatmap_data <- df %>%
+    rownames_to_column("Gene") %>%
+    gather(value = "expr", key = "Sample", -Gene) %>%
+    # reshape2::melt(value.name = "expr", varnames = c("Gene", "Sample")) %>%
+    left_join(gene_pos_table) %>%
+    left_join(sample_pos_table)
+
+  # Limits for the vertical axes
+  gene_axis_limits <- with(
+    gene_pos_table,
+    c(min(y_center - 0.5 * height), max(y_center + 0.5 * height))
+  ) +
+    0.1 * c(-1, 1) # extra spacing: 0.1
+
+  
+  max_expr <- max(abs(floor(min(heatmap_data$expr))), abs(ceiling(max(heatmap_data$expr))))
+  
+  # Heatmap plot
+  plt_hmap <- ggplot(
+    heatmap_data,
+    aes(
+      x = x_center, y = y_center, fill = expr,
+      height = height, width = width
+    )
+  ) +
+    geom_tile() +
+    # scale_fill_gradient2("Expr", high = "red", low = "blue") +
+    scale_fill_gradientn("log2FC", 
+                         limits = c(-1*max_expr, max_expr),
+                         colours = rev(colorRampPalette(colors = c("red", "white", "#094FED"))(50))) +
+    scale_x_continuous(
+      breaks = sample_pos_table$x_center,
+      labels = sample_pos_table$Sample,
+      expand = c(0, 0)
+    ) +
+    # For the y axis, alternatively set the labels as: gene_position_table$gene
+    scale_y_continuous(
+      breaks = gene_pos_table[, "y_center"],
+      # labels = rep("", nrow(gene_pos_table)),
+      labels = heatmap_data %>% arrange(y_center) %>% pull(Gene) %>% unique(),
+      limits = gene_axis_limits,
+      expand = c(0, 0),
+      position = "right"
+    ) +
+    labs(x = "Treatment", y = "") +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(size = rel(1), hjust = 0.5, angle = 0),
+      # margin: top, right, bottom, and left
+      plot.margin = unit(c(1, 0.2, 0.2, -0.7), "cm"),
+      panel.grid.minor = element_blank()
+    ) +
+    ggeasy::easy_all_text_size(size = 20) +
+    ggeasy::easy_y_axis_labels_size(size = 0) +
+    ggeasy::easy_rotate_x_labels(angle = 90)
+
+  # Dendrogram plot
+  plt_dendr <- ggplot(segment_data) +
+    geom_segment(aes(x = x, y = y, xend = xend, yend = yend)) +
+    scale_x_reverse(expand = c(0, 0.5)) +
+    scale_y_continuous(
+      breaks = gene_pos_table$y_center,
+      # labels = gene_pos_table$Gene,
+      labels = NULL,
+      limits = gene_axis_limits,
+      expand = c(0, 0)
+    ) +
+    labs(x = "Distance", y = "", colour = "", size = "") +
+    theme(panel.grid.minor = element_blank()) +
+    theme_bw() +
+    ggeasy::easy_all_text_size(size = 20)
+  
+  # results <- list(
+    # heatmap = plot_grid(plt_dendr, plt_hmap, align = "h", rel_widths = c(1, 1)),
+    # heatmap_data = 
+  # )
+  
+  plot_grid(plt_dendr, plt_hmap, align = "h", rel_widths = c(0.4, 1))
+}
+
+```
+
+# path_to_data
+```{r}
+# path_to_data <- "/media/carlos/HD_10_TB/bulk_RNAseq_Lydie/"
+# path_to_data <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/bulk_RNAseq_Lydie/"
+path_to_data <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/bulk_RNAseq_Lydie/"
+```
+
+# Load data
+```{r}
+# # Rat
+# col_names_1 <- list.files(path = paste0(path_to_data, "20220727_Plecita/count")) %>%
+#   str_remove(pattern = "_union_name.count") %>%
+#   str_remove(pattern = "Plecita-")
+# 
+# count_table_1 <- list.files(path = paste0(path_to_data, "20220727_Plecita/count/"), full.names = TRUE) %>% 
+#   as.list() %>% 
+#   purrr::map(read_delim, delim = "\t", escape_double = FALSE, col_names = FALSE, trim_ws = TRUE) %>% 
+#   purrr::reduce(full_join, by = "X1") %>%
+#   purrr::set_names(c("ensembl_gene_id", col_names_1))
+# 
+# count_table_1 <- count_table_1 %>%
+#   arrange(ensembl_gene_id) %>%
+#   dplyr::filter(!ensembl_gene_id %in% c("__alignment_not_unique", "__ambiguous", "__no_feature", "__not_aligned", "__too_low_aQual"))
+# 
+# count_table_1 %>% vroom::vroom_write(paste0(path_to_data, "rat_count_table.tsv"), delim = "\t", col_names = TRUE)
+# 
+# rat_count_table <- vroom::vroom(paste0(path_to_data, "rat_count_table.tsv"), delim = "\t", col_names = TRUE)
+# 
+# rat_count_table_1 <- rat_count_table %>% dplyr::select(ensembl_gene_id, scr3A, scr3B, scr3C, scr25A, scr25B, scr25C, si3A, si3B, si3C, si25A, si25B, si25C)
+# 
+# rat_count_table_1 %>% vroom::vroom_write(paste0(path_to_data, "rat_count_table_1.tsv"), delim = "\t", col_names = TRUE)
+# 
+# rat_count_table_2 <- rat_count_table %>% dplyr::select(ensembl_gene_id, Ct3A, Ct3B, Ct3C, Ct25A, Ct25B, Ct25C, G3A, G3B, G3C, M3A, M3B, M3C)
+# 
+# rat_count_table_2 %>% vroom::vroom_write(paste0(path_to_data, "rat_count_table_2.tsv"), delim = "\t", col_names = TRUE)
+# 
+# 
+# Mouse
+# col_names_2 <- list.files(path = paste0(path_to_data, "20220515_Plecita/count/")) %>%
+#   str_remove(pattern = "_union_name.count") %>%
+#   str_remove(pattern = "Plecita-")
+# 
+# count_table_2 <- list.files(path = paste0(path_to_data, "20220515_Plecita/count/"), full.names = TRUE) %>%
+#   as.list() %>%
+#   purrr::map(read_delim, delim = "\t", escape_double = FALSE, col_names = FALSE, trim_ws = TRUE) %>%
+#   purrr::reduce(full_join, by = "X1") %>%
+#   purrr::set_names(c("ensembl_gene_id", col_names_2))
+# 
+# # Obs: The name is wrongly labeled in the file, so here I correct
+# count_table_2 <- count_table_2 %>%
+#   dplyr::rename(M1 = W,
+#                 W1 = M,
+#                 W1plus = Mplus,
+#                 M1plus = Wplus
+#                 )
+# 
+# count_table_2 <- count_table_2 %>%
+#   dplyr::select(ensembl_gene_id, M1, M2, M3, M1plus, M2plus, M3plus, W1, W2, W3, W1plus, W2plus, W3plus)
+# 
+# count_table_2 <- count_table_2 %>%
+#   mutate(ensembl_gene_id = ensembl_gene_id %>% str_remove(pattern = "\\..*"))
+# 
+# count_table_2 <- count_table_2 %>%
+#   arrange(ensembl_gene_id) %>%
+#   dplyr::filter(!ensembl_gene_id %in% c("__alignment_not_unique", "__ambiguous", "__no_feature", "__not_aligned", "__too_low_aQual"))
+# 
+# count_table_2 %>% vroom::vroom_write(paste0(path_to_data, "mouse_count_table.tsv"), delim = "\t", col_names = TRUE)
+
+mouse_count_table <- vroom::vroom(paste0(path_to_data, "mouse_count_table.tsv"), delim = "\t", col_names = TRUE)
+```
+
+# Rat Id dictionaries
+```{r}
+# rat_count_table_1 <- vroom::vroom(paste0(path_to_data, "rat_count_table_1.tsv"), delim = "\t", col_names = TRUE)
+# 
+# mart = useEnsembl('genes'); listDatasets(mart)
+# 
+# ensembl <- useEnsembl(biomart = "ensembl", dataset = 'rnorvegicus_gene_ensembl')
+# listAttributes(mart = ensembl)
+# 
+# mart <- useMart("ensembl")
+# ensembl <- useDataset("rnorvegicus_gene_ensembl", mart = mart)
+# filters <- listFilters(ensembl)
+# attributes <- listAttributes(ensembl)
+# rat_gene_id_dict <- getBM(attributes = c("ensembl_gene_id", "entrezgene_id", "rgd_symbol", "description", "gene_biotype", "chromosome_name", "start_position", "end_position", "strand"), filters = "ensembl_gene_id", values = rat_count_table_1$ensembl_gene_id, mart = ensembl)
+# 
+# rat_gene_id_dict %>% vroom::vroom_write(paste0(path_to_data, "rat_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+
+rat_gene_id_dict <- vroom::vroom(paste0(path_to_data, "rat_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+
+rat_gene_id_dict <- rat_gene_id_dict %>% 
+  mutate(strand = strand %>% str_replace_all(pattern = "-1", replacement = "-")) %>% 
+  mutate(strand = strand %>% str_replace_all(pattern = "1", replacement = "+"))
+```
+
+# Mouse Id dictionaries
+```{r}
+# mart = useEnsembl('genes'); listDatasets(mart)
+# 
+# ensembl <- useEnsembl(biomart = "ensembl", dataset = 'mmusculus_gene_ensembl')
+# listAttributes(mart = ensembl)
+# 
+# mart <- useMart("ensembl")
+# ensembl <- useDataset("mmusculus_gene_ensembl", mart = mart)
+# filters <- listFilters(ensembl)
+# attributes <- listAttributes(ensembl)
+# mouse_gene_id_dict <- getBM(attributes = c("ensembl_gene_id", "entrezgene_id", "mgi_symbol", "description", "gene_biotype", "chromosome_name", "start_position", "end_position", "strand"), filters = "ensembl_gene_id", values = mouse_count_table$ensembl_gene_id, mart = ensembl)
+# 
+# mouse_gene_id_dict %>% vroom::vroom_write(paste0(path_to_data, "mouse_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+
+mouse_gene_id_dict <- vroom::vroom(paste0(path_to_data, "mouse_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+
+mouse_gene_id_dict <- mouse_gene_id_dict %>% 
+  mutate(strand = strand %>% str_replace_all(pattern = "-1", replacement = "-")) %>% 
+  mutate(strand = strand %>% str_replace_all(pattern = "1", replacement = "+"))
+```
+
+
+# Load processed count tables and id dictionaries
+```{r}
+# rat_count_table <- vroom::vroom(paste0(path_to_data, "rat_count_table.tsv"), delim = "\t", col_names = TRUE)
+
+rat_count_table_1 <- vroom::vroom(paste0(path_to_data, "rat_count_table_1.tsv"), delim = "\t", col_names = TRUE)
+
+rat_count_table_2 <- vroom::vroom(paste0(path_to_data, "rat_count_table_2.tsv"), delim = "\t", col_names = TRUE)
+
+rat_count_table_1 <- rat_count_table_1 %>% column_to_rownames(var = "ensembl_gene_id")
+
+rat_count_table_2 <- rat_count_table_2 %>% column_to_rownames(var = "ensembl_gene_id")
+
+rat_gene_id_dict <- vroom::vroom(paste0(path_to_data, "rat_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+
+mouse_count_table <- vroom::vroom(paste0(path_to_data, "mouse_count_table.tsv"), delim = "\t", col_names = TRUE)
+
+mouse_count_table <- mouse_count_table %>% column_to_rownames(var = "ensembl_gene_id")
+
+mouse_gene_id_dict <- vroom::vroom(paste0(path_to_data, "mouse_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+```
+
+# Design
+```{r }
+rat_1_design_df <- data.frame(row.names = colnames(rat_count_table_1), 
+                              condition = colnames(rat_count_table_1) %>% str_sub(start = 1, end = -2))
+
+rat_1_group <- rat_1_design_df$condition %>% as.factor()
+rat_1_design <- model.matrix(~ 0 + rat_1_group)
+colnames(rat_1_design) <- rat_1_group %>% levels()
+rownames(rat_1_design) <- rat_count_table_1 %>% colnames()
+
+rat_2_design_df <- data.frame(row.names = colnames(rat_count_table_2), 
+                              condition = colnames(rat_count_table_2) %>% str_sub(start = 1, end = -2))
+
+rat_2_group <- rat_2_design_df$condition %>% as.factor()
+rat_2_design <- model.matrix(~ 0 + rat_2_group)
+colnames(rat_2_design) <- rat_2_group %>% levels()
+rownames(rat_2_design) <- rat_count_table_2 %>% colnames()
+
+mouse_design_df <- data.frame(row.names = colnames(mouse_count_table), 
+                         condition = rep(c("M", "Mplus", "W", "Wplus"), each = 3))
+
+mouse_group <- mouse_design_df$condition %>% as.factor()
+mouse_design <- model.matrix(~ 0 + mouse_group)
+colnames(mouse_design) <- mouse_group %>% levels()
+rownames(mouse_design) <- mouse_count_table %>% colnames()
+```
+
+# Number of counts per sample
+```{r, fig.width = 10, fig.height=6, dpi = 900}
+rat_1_sum_data <- data.frame(Counts = c(rat_count_table_1 %>% colSums() %>% mean(), (apply(rat_count_table_1, MARGIN = 2, FUN = sum))))
+rat_1_sum_data <- rat_1_sum_data %>% mutate(Samples = c("Average", rat_count_table_1 %>% colnames()))
+
+col_cell <- brewer.pal(4, "Dark2")[rat_1_design_df$condition %>% as.factor()]
+
+par(mar = c(6, 6, 3, 3))
+rat_1_n_counts_per_sample_figure <- rat_1_sum_data %>%
+  ggplot(aes(x = Samples, y = Counts, fill = Samples)) +
+  geom_bar(colour = "black", stat = "identity", fill = c("yellow", col_cell)) +
+  geom_hline(mapping = NULL, data = NULL, yintercept = 10e+06, na.rm = FALSE, show.legend = NA, colour = "black") +
+  theme_bw() +
+  scale_x_discrete(limits = rat_1_sum_data$Samples
+                   # labels = c("Average", rep(" ", nrow(rat_1_sum_data) - 1))
+                   ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  # theme(axis.text.x = element_blank()) 
+  easy_x_axis_title_size(size = 20) +
+  easy_y_axis_title_size(size = 20)
+
+# rat_1_n_counts_per_sample_figure %>% ggsave(filename = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/rat_!_n_counts_per_sample_figure.tiff"), device = "tiff", height = 7, width = 12)
+
+# rat_1_n_counts_per_sample_figure %>% ggsave(filename = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/rat_1_n_counts_per_sample_figure.jpeg"), device = "jpeg", height = 7, width = 12)
+
+rat_2_sum_data <- data.frame(Counts = c(rat_count_table_2 %>% colSums() %>% mean(), (apply(rat_count_table_2, MARGIN = 2, FUN = sum))))
+rat_2_sum_data <- rat_2_sum_data %>% mutate(Samples = c("Average", rat_count_table_2 %>% colnames()))
+
+col_cell <- brewer.pal(4, "Dark2")[rat_2_design_df$condition %>% as.factor()]
+
+par(mar = c(6, 6, 3, 3))
+rat_2_n_counts_per_sample_figure <- rat_2_sum_data %>%
+  ggplot(aes(x = Samples, y = Counts, fill = Samples)) +
+  geom_bar(colour = "black", stat = "identity", fill = c("yellow", col_cell)) +
+  geom_hline(mapping = NULL, data = NULL, yintercept = 10e+06, na.rm = FALSE, show.legend = NA, colour = "black") +
+  theme_bw() +
+  scale_x_discrete(limits = rat_2_sum_data$Samples
+                   # labels = c("Average", rep(" ", nrow(rat_2_sum_data) - 1))
+                   ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  # theme(axis.text.x = element_blank()) 
+  easy_x_axis_title_size(size = 20) +
+  easy_y_axis_title_size(size = 20)
+
+# rat_2_n_counts_per_sample_figure %>% ggsave(filename = "/media/carlos/HD_20_TB/Physiology_Institute_RNA_Seq/rat_!_n_counts_per_sample_figure.tiff"), device = "tiff", height = 7, width = 12)
+
+# rat_2_n_counts_per_sample_figure %>% ggsave(filename = "/media/carlos/HD_20_TB/Physiology_Institute_RNA_Seq/rat_2_n_counts_per_sample_figure.jpeg"), device = "jpeg", height = 7, width = 12)
+
+mouse_sum_data <- data.frame(Counts = c(mouse_count_table %>% colSums() %>% mean(), (apply(mouse_count_table, MARGIN = 2, FUN = sum))))
+mouse_sum_data <- mouse_sum_data %>% mutate(Samples = c("Average", mouse_count_table %>% colnames()))
+
+col_cell <- brewer.pal(4, "Dark2")[mouse_design_df$condition %>% as.factor()]
+
+par(mar = c(6, 6, 3, 3))
+mouse_n_counts_per_sample_figure <- mouse_sum_data %>%
+  ggplot(aes(x = Samples, y = Counts, fill = Samples)) +
+  geom_bar(colour = "black", stat = "identity", fill = c("yellow", col_cell)) +
+  geom_hline(mapping = NULL, data = NULL, yintercept = 10e+06, na.rm = FALSE, show.legend = NA, colour = "black") +
+  theme_bw() +
+  scale_x_discrete(limits = mouse_sum_data$Samples
+                   # labels = c("Average", rep(" ", nrow(mouse_sum_data) - 1))
+                   ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  # theme(axis.text.x = element_blank()) 
+  easy_x_axis_title_size(size = 20) +
+  easy_y_axis_title_size(size = 20)
+
+# mouse_n_counts_per_sample_figure %>% ggsave(filename = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/mouse_n_counts_per_sample_figure.tiff"), device = "tiff", height = 7, width = 12)
+
+# mouse_n_counts_per_sample_figure %>% ggsave(filename = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/mouse_n_counts_per_sample_figure.jpeg"), device = "jpeg", height = 7, width = 12)
+
+mouse_n_counts_per_sample_figure %>% ggsave(filename = paste0(path_to_data, "mouse_n_counts_per_sample_figure.png"), device = "png", height = 7, width = 12)
+```
+
+# Rat - Filter genes 
+# Need a CPM greater than 1 in 3 or more samples to keep
+```{r }
+rat_1_dge_list  <- rat_count_table_1 %>% DGEList(lib.size = colSums(rat_count_table_1), group = rat_1_group)
+# keep <- rowSums(d %>% cpm() > 1) >= 1
+rat_1_keep <- rowSums(rat_1_dge_list  %>% cpm() > 1) >= 3
+rat_1_filtered <- rat_1_dge_list [rat_1_keep, ]
+rat_1_keep %>% summary()
+rat_1_filtered %>% dim()
+
+rat_1_filtered_count_data <- rat_1_filtered$counts
+
+rat_2_dge_list  <- rat_count_table_2 %>% DGEList(lib.size = colSums(rat_count_table_2), group = rat_2_group)
+# keep <- rowSums(d %>% cpm() > 1) >= 1
+rat_2_keep <- rowSums(rat_2_dge_list  %>% cpm() > 1) >= 3
+rat_2_filtered <- rat_2_dge_list [rat_2_keep, ]
+rat_2_keep %>% summary()
+rat_2_filtered %>% dim()
+
+rat_2_filtered_count_data <- rat_2_filtered$counts
+```
+
+# Mouse - Filter genes 
+# Need a CPM greater than 1 in 3 or more samples to keep
+```{r }
+mouse_dge_list <- mouse_count_table %>% DGEList(lib.size = colSums(mouse_count_table), group = mouse_group)
+# keep <- rowSums(d %>% cpm() > 1) >= 1
+mouse_keep <- rowSums(mouse_dge_list %>% cpm() > 1) >= 3
+mouse_filtered <- mouse_dge_list[mouse_keep, ]
+mouse_keep %>% summary()
+mouse_filtered %>% dim()
+
+mouse_filtered_count_data <- mouse_filtered$counts
+```
+
+# Batch effect removal
+# Least significantly DE genes based on a first-pass DE analysis performed prior to RUVg normalization.
+```{r }
+rat_1_fit <- rat_1_filtered_count_data %>%
+  DGEList(lib.size = colSums(rat_1_filtered_count_data), group = rat_1_group) %>%
+  calcNormFactors(method = "TMM") %>%
+  estimateDisp(design = rat_1_design, tagwise = TRUE, robust = TRUE) %>%
+  glmFit(rat_1_design)
+
+rat_1_lrt <- rat_1_fit %>% glmLRT(coef = 4)
+
+rat_1_top <- topTags(rat_1_lrt, n = nrow(rat_1_dge_list ))$table
+
+# Here, we consider all but the top 500 genes as ranked by edgeR p-values
+rat_1_empirical <- rownames(rat_1_filtered_count_data)[which(!(rownames(rat_1_filtered_count_data) %in% rownames(rat_1_top)[1:10000]))]
+
+rat_2_fit <- rat_2_filtered_count_data %>%
+  DGEList(lib.size = colSums(rat_2_filtered_count_data), group = rat_2_group) %>%
+  calcNormFactors(method = "TMM") %>%
+  estimateDisp(design = rat_2_design, tagwise = TRUE, robust = TRUE) %>%
+  glmFit(rat_2_design)
+
+rat_2_lrt <- rat_2_fit %>% glmLRT(coef = 4)
+
+rat_2_top <- topTags(rat_2_lrt, n = nrow(rat_2_dge_list))$table
+
+# Here, we consider all but the top 500 genes as ranked by edgeR p-values
+rat_2_empirical <- rownames(rat_2_filtered_count_data)[which(!(rownames(rat_2_filtered_count_data) %in% rownames(rat_2_top)[1:10000]))]
+
+mouse_fit <- mouse_filtered_count_data %>%
+  DGEList(lib.size = colSums(mouse_filtered_count_data), group = mouse_group) %>%
+  calcNormFactors(method = "TMM") %>%
+  estimateDisp(design = mouse_design, tagwise = TRUE, robust = TRUE) %>%
+  glmFit(mouse_design)
+
+mouse_lrt <- mouse_fit %>% glmLRT(coef = 4)
+
+mouse_top <- topTags(mouse_lrt, n = nrow(mouse_dge_list))$table
+
+# Here, we consider all but the top 500 genes as ranked by edgeR p-values
+mouse_empirical <- rownames(mouse_filtered_count_data)[which(!(rownames(mouse_filtered_count_data) %in% rownames(mouse_top)[1:2000]))]
+```
+
+# The RUVg function  returns  two  pieces  of  information:
+# the estimated factors of unwanted variation nd the normalized counts obtained by regressing the original counts on the unwanted factors
+# The normalized values are stored in the normalizedCounts slot
+```{r }
+rat_1_set2 <- rat_1_fit$counts %>%
+  as.matrix() %>%
+  RUVg(rat_1_empirical, k = 1)
+
+rat_2_set2 <- rat_2_fit$counts %>%
+  as.matrix() %>%
+  RUVg(rat_2_empirical, k = 1)
+
+mouse_set2 <- mouse_fit$counts %>%
+  as.matrix() %>%
+  RUVg(mouse_empirical, k = 1)
+```
+
+# PlotRLE
+# plotRLE creates relative log expression (RLE) plot, initially proposed to measure the overall quality of a dataset
+# plotRLE can also be used to visualize the presence of unwanted batch effects in the data
+```{r, fig.width = 15, fig.height=6, dpi = 900}
+# par(mfrow = c(1, 2), mar = c(8.1, 4.1, 4.1, 2.1))
+
+rat_1_filtered_count_data %>% 
+  as.matrix() %>% 
+  cpm() %>%
+  plotRLE(outline = FALSE, ylim = c(-2.5, 2.5), col = col_cell, main = "Samples with \n unwanted variation", cex.main = 2, las = 2, cex.axis = 0.8, style = "full", outlier.alpha = 0.1, outlier.shape = 3, outlier.size = 0, legend = TRUE)
+# legend("topright", inset = c(0.0, 0), legend = group %>% levels(), col = col_cell %>% unique(), ncol = 2, cex = 0.5, border = "black", fill = col_cell %>% unique())
+mtext(side = 1, text = "Samples", line = 7, cex = 2)
+mtext(side = 2, text = "Relative Log Expression (RLE)", line = 1.5, cex = 2)
+
+rat_1_set2$normalizedCounts %>%
+  plotRLE(outline = FALSE, ylim = c(-2.5, 2.5), col = col_cell, main = "Samples without \n unwanted variation", cex.main = 2, las = 2, cex.axis = 0.8, style = "full", outlier.alpha = 0.1, outlier.shape = 3, outlier.size = 0)
+legend("topright", inset = c(0.0, 0), legend = rat_1_group %>% levels(), col = col_cell %>% unique(), ncol = 2, cex = 0.8, border = "black", fill = col_cell %>% unique())
+mtext(side = 1, text = "Samples", line = 7, cex = 2)
+# mtext(side = 2, text = "Relative Log Expression (RLE)", line = 1.5, cex = 2)
+
+rat_2_filtered_count_data %>% 
+  as.matrix() %>% 
+  cpm() %>%
+  plotRLE(outline = FALSE, ylim = c(-2.5, 2.5), col = col_cell, main = "Samples with \n unwanted variation", cex.main = 2, las = 2, cex.axis = 0.8, style = "full", outlier.alpha = 0.1, outlier.shape = 3, outlier.size = 0, legend = TRUE)
+# legend("topright", inset = c(0.0, 0), legend = group %>% levels(), col = col_cell %>% unique(), ncol = 2, cex = 0.5, border = "black", fill = col_cell %>% unique())
+mtext(side = 1, text = "Samples", line = 7, cex = 2)
+mtext(side = 2, text = "Relative Log Expression (RLE)", line = 1.5, cex = 2)
+
+rat_2_set2$normalizedCounts %>%
+  plotRLE(outline = FALSE, ylim = c(-2.5, 2.5), col = col_cell, main = "Samples without \n unwanted variation", cex.main = 2, las = 2, cex.axis = 0.8, style = "full", outlier.alpha = 0.1, outlier.shape = 3, outlier.size = 0)
+legend("topright", inset = c(0.0, 0), legend = rat_2_group %>% levels(), col = col_cell %>% unique(), ncol = 2, cex = 0.8, border = "black", fill = col_cell %>% unique())
+mtext(side = 1, text = "Samples", line = 7, cex = 2)
+# mtext(side = 2, text = "Relative Log Expression (RLE)", line = 1.5, cex = 2)
+
+
+par(mfrow = c(1, 2), mar = c(8.1, 4.1, 4.1, 2.1))
+mouse_filtered_count_data %>% 
+  as.matrix() %>% 
+  cpm() %>%
+  plotRLE(outline = FALSE, ylim = c(-2.5, 2.5), col = col_cell, main = "Samples with \n unwanted variation", cex.main = 2, las = 2, cex.axis = 0.8, style = "full", outlier.alpha = 0.1, outlier.shape = 3, outlier.size = 0, legend = TRUE)
+# legend("topright", inset = c(0.0, 0), legend = group %>% levels(), col = col_cell %>% unique(), ncol = 2, cex = 0.5, border = "black", fill = col_cell %>% unique())
+mtext(side = 1, text = "Samples", line = 7, cex = 2)
+mtext(side = 2, text = "Relative Log Expression (RLE)", line = 1.5, cex = 2)
+
+mouse_set2$normalizedCounts %>%
+  plotRLE(outline = FALSE, ylim = c(-2.5, 2.5), col = col_cell, main = "Samples without \n unwanted variation", cex.main = 2, las = 2, cex.axis = 0.8, style = "full", outlier.alpha = 0.1, outlier.shape = 3, outlier.size = 0)
+legend("topright", inset = c(0.0, 0), legend = mouse_group %>% levels(), col = col_cell %>% unique(), ncol = 2, cex = 0.8, border = "black", fill = col_cell %>% unique())
+mtext(side = 1, text = "Samples", line = 7, cex = 2)
+# mtext(side = 2, text = "Relative Log Expression (RLE)", line = 1.5, cex = 2)
+```
+
+# PCAs 
+```{r}
+rat_1_pca_res <- rat_1_filtered_count_data %>% t() %>% prcomp(scale. = TRUE) 
+
+rat_1_pca_res$x %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample") %>% 
+  mutate(group = sample %>% str_sub(start = 1, end = -2)) %>% 
+  ggplot(aes(x = PC1, y = PC2, color = group)) +
+  geom_point() +
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() +
+  ggeasy::easy_all_text_size(size = 20)
+
+rat_1_pca_ruv <- rat_1_set2$normalizedCounts %>% t() %>% prcomp(scale. = TRUE) 
+
+rat_1_pca_ruv$x %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample") %>% 
+  mutate(group = sample %>% str_sub(start = 1, end = -2)) %>% 
+  ggplot(aes(x = PC1, y = PC2, color = group)) +
+  geom_point() +
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() +
+  ggeasy::easy_all_text_size(size = 20)
+
+rat_2_pca_res <- rat_2_filtered_count_data %>% t() %>% prcomp(scale. = TRUE) 
+
+rat_2_pca_res$x %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample") %>% 
+  mutate(group = sample %>% str_sub(start = 1, end = -2)) %>% 
+  ggplot(aes(x = PC1, y = PC2, color = group)) +
+  geom_point() +
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() +
+  ggeasy::easy_all_text_size(size = 20)
+
+rat_2_pca_ruv <- rat_2_set2$normalizedCounts %>% t() %>% prcomp(scale. = TRUE) 
+
+rat_2_pca_ruv$x %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample") %>% 
+  mutate(group = sample %>% str_sub(start = 1, end = -2)) %>% 
+  ggplot(aes(x = PC1, y = PC2, color = group)) +
+  geom_point() +
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() +
+  ggeasy::easy_all_text_size(size = 20)
+
+mouse_pca_res <- mouse_filtered_count_data %>% t() %>% prcomp(scale. = TRUE) 
+
+mouse_pca_res$x %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample") %>% 
+  mutate(group = rep(c("W", "Wplus", "M", "Mplus"), each = 3)) %>% 
+  ggplot(aes(x = PC1, y = PC2, color = group)) +
+  geom_point() +
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() +
+  ggeasy::easy_all_text_size(size = 20)
+
+mouse_pca_ruv <- mouse_set2$normalizedCounts %>% t() %>% prcomp(scale. = TRUE) 
+
+mouse_pca_ruv$x %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample") %>% 
+  mutate(group = rep(c("W", "Wplus", "M", "Mplus"), each = 3)) %>% 
+  ggplot(aes(x = PC1, y = PC2, color = group)) +
+  geom_point() +
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() +
+  ggeasy::easy_all_text_size(size = 20)
+```
+
+# Comparisons
+```{r}
+rat_1_comparisons_v <- c("scr25_x_scr3",
+                         "si25_x_si3",
+                         "si3_x_scr3",
+                         "si25_x_scr25"
+                         )
+
+rat_2_comparisons_v <- c("Ct25_x_Ct3",
+                         "G3_x_Ct3",
+                         "M3_x_Ct3"
+                         )
+
+mouse_comparisons_v <- c("W_x_M",
+                         "Wplus_x_Mplus",
+                         "Mplus_x_M",
+                         "Wplus_x_W"
+                         )
+```
+
+# DE analysis
+# Rat_1
+```{r, message=FALSE, warning=FALSE}
+threshold <- 0.05
+LFC <- 1
+n_sets <- 4
+
+rat_1_contr_matrix <- makeContrasts(
+  con1 = scr25 - scr3, # scr, high vs low 
+  con2 = si25 - si3, # si, high vs low
+  con3 = si3 - scr3, # low, si vs scr
+  con4 = si25 - scr25, # high, si vs scr
+  levels = c("scr25", 
+             "scr3",
+             "si25",
+             "si3")
+)
+
+# edgeR pipeline
+rat_1_fit <- rat_1_filtered_count_data %>%
+# rat_1_fit <- rat_1_set2$normalizedCounts %>%
+  DGEList(lib.size = colSums(rat_1_filtered_count_data), group = rat_1_group) %>%
+  calcNormFactors("TMM") %>%
+  estimateDisp(rat_1_design, robust = TRUE) %>%
+  glmFit(rat_1_design)
+
+rownames(rat_1_fit$counts) <- rat_1_filtered_count_data %>% rownames()
+
+rat_1_lrt1 <- purrr::map(seq_len(n_sets), function(i) glmLRT(rat_1_fit, contrast = rat_1_contr_matrix[, i]))
+
+rat_1_edgeR_results <- purrr::map(seq_along(rat_1_lrt1), function(i) topTags(rat_1_lrt1[[i]], n = nrow(rat_1_lrt1[[i]]), sort.by = "p.value"))
+
+rat_1_edgeR_results <- purrr::map(seq_along(rat_1_edgeR_results), function(i) rat_1_edgeR_results[[i]]$table) %>%
+  purrr::map(rownames_to_column, var = "ensembl_gene_id") %>%
+  purrr::map(mutate, pi_value = abs(logFC) * (-1) * log10(FDR)) %>%
+  purrr::map(dplyr::arrange, FDR)
+
+rat_1_edgeR_results <- rat_1_edgeR_results %>% 
+  purrr::map(mutate, up_down = dplyr::if_else(condition = logFC > 0, true = "up", false = "down"))
+
+rat_1_edgeR_results <- rat_1_edgeR_results %>% 
+  purrr::map(mutate, DEG_status = dplyr::if_else(condition = logFC > 1 & FDR < 0.05, true = "Up", false = dplyr::if_else(condition = logFC < -1 & FDR < 0.05, true = "Down", false = "Not_DEG"))) 
+
+rat_1_edgeR_results <- rat_1_edgeR_results %>%
+  purrr::map(left_join, rat_gene_id_dict, by = "ensembl_gene_id") %>% 
+  purrr::map(dplyr::select, c(ensembl_gene_id, entrezgene_id, rgd_symbol, gene_biotype), everything()) %>% 
+  purrr::set_names(rat_1_comparisons_v)
+
+rat_1_edgeR_results <- rat_1_edgeR_results %>% 
+  purrr::map(mutate_at, .vars = c("logFC", "logCPM", "LR", "pi_value"), .funs = round, digits = 2) %>% 
+  purrr::map(mutate_at, .vars = c("PValue", "FDR"), .funs = formatC, digits = 2, format = "e") 
+
+rat_1_edgeR_results <- rat_1_edgeR_results %>% 
+  purrr::map(mutate, length = end_position - start_position)
+
+rat_1_edgeR_results <- rat_1_edgeR_results %>% 
+  purrr::map(mutate, gene_biotype_1 = gene_biotype) %>% 
+  purrr::map(mutate, gene_biotype_1 = dplyr::if_else(gene_biotype_1 == "protein_coding", true = gene_biotype_1, false = dplyr::if_else(length < 200, true = "miRNA", false = "lncRNA")))
+
+rat_1_edgeR_topDE_1 <- rat_1_edgeR_results %>% purrr::map(dplyr::filter, as.numeric(FDR) < threshold)
+
+rat_1_edgeR_topDE_2 <- rat_1_edgeR_topDE_1 %>% purrr::map(filter, abs(logFC) >= LFC)
+
+rat_1_edgeR_DE_names <- rat_1_edgeR_topDE_2 %>%
+  purrr::map(dplyr::select, ensembl_gene_id) %>%
+  purrr::map(pull)
+
+rat_1_edgeR_n_DEGs <- rat_1_edgeR_DE_names %>% purrr::map(length)
+
+rat_1_edgeR_topDE_2 %>% 
+  purrr::map(group_by, up_down) %>% 
+  purrr::map(tally)
+```
+
+# Volcano plot
+```{r}
+rat_1_volcano_plot_scr25_x_scr3 <- rat_1_edgeR_results$scr25_x_scr3 %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+                     labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  xlim(c(-11, 11)) + ylim(c(0, 200)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+rat_1_volcano_plot_scr25_x_scr3 %>%
+  ggsave(filename = paste0(path_to_data, "rat_1_volcano_plot_scr25_x_scr3.png"), device = "png", dpi = 900, width = 10, height = 5)
+
+rat_1_volcano_plot_si25_x_si3 <- rat_1_edgeR_results$si25_x_si3 %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+                     labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  xlim(c(-10, 10)) + ylim(c(0, 200)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+rat_1_volcano_plot_si25_x_si3 %>%
+  ggsave(filename = paste0(path_to_data, "rat_1_volcano_plot_si25_x_si3.png"), device = "png", dpi = 900, width = 10, height = 5)
+
+rat_1_volcano_plot_si3_x_scr3 <- rat_1_edgeR_results$si3_x_scr3 %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  # scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+  #                    labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  scale_color_manual(values = c("Not_DEG" = "black"),
+                     labels = c("Not significant")) +
+  xlim(c(-3.5, 3.5)) + ylim(c(0, 5)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+rat_1_volcano_plot_si3_x_scr3 %>%
+  ggsave(filename = paste0(path_to_data, "rat_1_volcano_plot_si3_x_scr3.png"), device = "png", dpi = 900, width = 10, height = 5)
+
+rat_1_volcano_plot_si25_x_scr25 <- rat_1_edgeR_results$si25_x_scr25 %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  # scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+  #                    labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  scale_color_manual(values = c("Not_DEG" = "black"),
+                     labels = c("Not significant")) +
+  xlim(c(-3.5, 3.5)) + ylim(c(0, 3)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+rat_1_volcano_plot_si25_x_scr25 %>%
+  ggsave(filename = paste0(path_to_data, "rat_1_volcano_plot_si25_x_scr25.png"), device = "png", dpi = 900, width = 10, height = 5)
+```
+
+
+# Save tpm table
+```{r}
+# rat_1_filtered_count_data %>% cpm() %>% as.data.frame() %>%  vroom::vroom_write(file = paste0(path_to_data, "rat_1_filtered_count_data_tpm.tsv"), delim = "/t")
+# rat_2_filtered_count_data %>% cpm() %>% as.data.frame() %>%  vroom::vroom_write(file = paste0(path_to_data, "rat_2_filtered_count_data_tpm.tsv"), delim = "/t")
+```
+
+
+# Heatmap with ggplot
+# from https://stackoverflow.com/questions/42047896/joining-a-dendrogram-and-a-heatmap
+```{r}
+rat_1_DEG_set <- rat_1_edgeR_DE_names %>% unlist() %>% unique() %>% sort()
+
+rat_1_df <- rat_1_edgeR_results %>% 
+  purrr::map(dplyr::select, c(ensembl_gene_id, rgd_symbol, logFC)) %>% 
+  purrr::reduce(full_join, by = c("ensembl_gene_id", "rgd_symbol")) %>% 
+  purrr::set_names("ensembl_gene_id", "rgd_symbol", "scr25_x_scr3",  "si25_x_si3", "si3_x_scr3", "si25_x_scr25") %>% 
+  dplyr::filter(ensembl_gene_id %in% rat_1_DEG_set) %>% 
+  unite(ensembl_gene_id:rgd_symbol, col = "gene") %>% 
+  # arrange() %>% 
+  distinct(gene, .keep_all = TRUE) %>% 
+  column_to_rownames(var = "gene")
+  
+
+# gene_pos_table %>% vroom::vroom_write(file = paste0(path_to_files, "gene_pos_table.tsv"), delim = "\t")
+
+rat_1_heatmap_dendro_fig <- rat_1_df %>% 
+    plot_heatmap_and_dendro()
+
+# rat_1_heatmap_dendro_fig %>%
+#   ggsave(filename = paste0(path_to_files, "rat_1_DEGs_heatmap.png"), device = "png", height = 8, width = 10, dpi = 900)
+```
+
+# Venn Diagram - Rat_1
+```{r}
+draw.pairwise.venn(
+  area1 = rat_1_edgeR_DE_names$scr25_x_scr3 %>% length(),
+  area2 = rat_1_edgeR_DE_names$si25_x_si3 %>% length(),
+  cross.area = intersect(rat_1_edgeR_DE_names$scr25_x_scr3, rat_1_edgeR_DE_names$si25_x_si3) %>% length(), 
+  fill = c(brewer.pal(4, "Dark2")[1], brewer.pal(4, "Dark2")[3]), 
+  scaled = FALSE, 
+  category = c("scr25_x_scr3", "si25_x_si3"), 
+  cat.pos = c(0, 0), 
+  cat.cex = c(2, 2), 
+  cex = 1.5
+  )
+```
+
+```{r}
+rat_1_n_DEGs <- rat_1_edgeR_topDE_2 %>% purrr::map(nrow) %>% bind_rows() %>% t() %>% as.data.frame()
+
+rat_1_up_DEGs <- rat_1_edgeR_topDE_2 %>% purrr::map(dplyr::filter, logFC > 0) %>% purrr::map(nrow) %>% bind_rows() %>% t() %>% as.data.frame()
+
+rat_1_down_DEGs <- rat_1_edgeR_topDE_2 %>% purrr::map(dplyr::filter, logFC < 0) %>% purrr::map(nrow) %>% bind_rows() %>% t() %>% as.data.frame()
+
+rat_1_n_DEGs %>% bind_cols(rat_1_up_DEGs) %>% bind_cols(rat_1_down_DEGs) %>% purrr::set_names(c("DEGs", "Up", "Down")) %>% rownames_to_column("Comparison") %>% DT::datatable(options = list(columnDefs = list(list(className = "dt-center", targets = "_all"))))
+```
+
+```{r}
+rat_1_edgeR_results_table <- rat_1_edgeR_results %>% 
+  purrr::map(mutate_at, .vars = c("PValue", "FDR"), .funs = formatC, digits = 2, format = "e") %>% 
+  purrr::map(dplyr::select, c("ensembl_gene_id", "entrezgene_id", "rgd_symbol", "gene_biotype", "description", "chromosome_name", "start_position", "end_position", "logFC", "PValue", "FDR")) %>%
+  purrr::reduce(full_join, b = c("ensembl_gene_id", "entrezgene_id", "rgd_symbol", "gene_biotype", "description", "chromosome_name", "start_position", "end_position")) %>% 
+  purrr::set_names(c("ensembl_gene_id", "entrezgene_id", "rgd_symbol", "gene_biotype", "description", "chromosome_name", "start_position", "end_position", "LFC_scr25_x_scr3", "p_value_scr25_x_scr3", "FDR_scr25_x_scr3", "LFC_si25_x_si3", "p_value_si25_x_si3", "FDR_si25_x_si3", "LFC_si3_x_scr3", "p_value_si3_x_scr3", "FDR_si3_x_scr3", "LFC_si25_x_scr25", "p_value_si25_x_scr25", "FDR_si25_x_scr25")) %>% 
+  full_join(rat_1_filtered_count_data %>% as.data.frame() %>% rownames_to_column(var = "ensembl_gene_id")) %>% 
+  arrange(ensembl_gene_id)
+
+# rat_1_edgeR_results_table %>% vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/rat_1_edgeR_results_table.tsv", delim = "\t", col_names = TRUE)
+rat_1_edgeR_results_table %>% vroom::vroom_write(file = paste0(path_to_data, "rat_1_edgeR_results_table.tsv"), delim = "\t", col_names = TRUE)
+```
+
+# DEG boxplots - Rat 1 - cpm
+```{r}
+# rat_1_DEGs <- union(rat_1_edgeR_DE_names$scr25_x_scr3, rat_1_edgeR_DE_names$si25_x_si3)
+
+# Mplus_x_M
+rat_1_gene_table_2_boxplot <- rat_1_filtered_count_data %>% 
+  edgeR::cpm() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "ensembl_gene_id") %>% 
+  left_join(rat_gene_id_dict, by = "ensembl_gene_id") %>% 
+  # dplyr::filter(ensembl_gene_id %in% rat_1_genes) %>% 
+  mutate(gene = paste0(ensembl_gene_id, " (", rgd_symbol, ")" )) %>% 
+  pivot_longer(cols = scr3A:si25C, names_to = "Sample", values_to = "read_count") %>% 
+  dplyr::mutate(Sample = Sample %>% dplyr::recode(scr3A = "scr3", scr3B = "scr3", scr3C = "scr3", scr25A = "scr25", scr25B = "scr25", scr25C = "scr25", si3A = "si3", si3B = "si3", si3C = "si3", si25A = "si25", si25B = "si25", si25C = "si25")) %>% 
+  mutate(Sample = Sample %>% factor(levels = c("scr3", "scr25", "si3", "si25"))) %>% 
+  dplyr::select(gene, Sample, read_count)
+
+rat_1_gene_title <- rat_1_gene_table_2_boxplot$gene %>% unique()
+
+rat_1_gene_boxplot_list <- purrr::map(seq_len(nrow(rat_1_filtered_count_data)), function(i){
+  print(i)
+  rat_1_gene_table_2_boxplot %>% 
+    dplyr::filter(gene == rat_1_gene_title[i]) %>% 
+    ggplot(aes(x = Sample, y = read_count, fill = Sample)) + 
+    geom_boxplot() +
+    geom_point() +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    scale_fill_brewer(palette = "Dark2") +
+    labs(x = "", y = "Normalized read count (CPM)", title = rat_1_gene_title[i]) +
+    theme_bw() +
+    ggeasy::easy_all_text_size(size = 20)
+})
+
+```
+
+# DEG boxplots - Rat 1 - raw
+```{r}
+# rat_1_DEGs <- union(rat_1_edgeR_DE_names$scr25_x_scr3, rat_1_edgeR_DE_names$si25_x_si3)
+
+# Mplus_x_M
+rat_1_gene_table_2_boxplot <- rat_1_filtered_count_data %>% 
+  # edgeR::cpm() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "ensembl_gene_id") %>% 
+  left_join(rat_gene_id_dict, by = "ensembl_gene_id") %>% 
+  # dplyr::filter(ensembl_gene_id %in% rat_1_genes) %>% 
+  mutate(gene = paste0(ensembl_gene_id, " (", rgd_symbol, ")" )) %>% 
+  pivot_longer(cols = scr3A:si25C, names_to = "Sample", values_to = "read_count") %>% 
+  dplyr::mutate(Sample = Sample %>% dplyr::recode(scr3A = "scr3", scr3B = "scr3", scr3C = "scr3", scr25A = "scr25", scr25B = "scr25", scr25C = "scr25", si3A = "si3", si3B = "si3", si3C = "si3", si25A = "si25", si25B = "si25", si25C = "si25")) %>% 
+  mutate(Sample = Sample %>% factor(levels = c("scr3", "scr25", "si3", "si25"))) %>% 
+  dplyr::select(gene, Sample, read_count)
+
+rat_1_gene_title <- rat_1_gene_table_2_boxplot$gene %>% unique()
+
+rat_1_gene_boxplot_list <- purrr::map(seq_len(nrow(rat_1_filtered_count_data)), function(i){
+  print(i)
+  rat_1_gene_table_2_boxplot %>% 
+    dplyr::filter(gene == rat_1_gene_title[i]) %>% 
+    ggplot(aes(x = Sample, y = read_count, fill = Sample)) + 
+    geom_boxplot() +
+    geom_point() +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    scale_fill_brewer(palette = "Dark2") +
+    labs(x = "", y = "Raw read count", title = rat_1_gene_title[i]) +
+    theme_bw() +
+    ggeasy::easy_all_text_size(size = 20)
+})
+
+# Save figures
+purrr::map(seq_along(rat_1_gene_boxplot_list), function(i) {
+  print(i)
+  rat_1_gene_boxplot_list[[i]] %>% ggsave(filename = paste0(path_to_data, "rat_1_DEG_raw_boxplots/", rat_1_gene_title[i], "_raw_boxplot.png"), width = 7, height = 5, dpi = 900)
+  })
+```
+
+
+# Rat_2
+```{r, message=FALSE, warning=FALSE}
+threshold <- 0.05
+LFC <- 1
+n_sets <- 3
+
+rat_2_contr_matrix <- makeContrasts(
+  con1 = Ct25 - Ct3, # Ct, high vs low 
+  con2 = G3 - Ct3, # low, G vs Ct
+  con3 = M3 - Ct3, # low, M vs Ct
+  levels = c("Ct25",
+             "Ct3",
+             "G3",
+             "M3")
+)
+
+# edgeR pipeline
+rat_2_fit <- rat_2_filtered_count_data %>%
+# rat_2_fit <- rat_2_set2$normalizedCounts %>%
+  DGEList(lib.size = colSums(rat_2_filtered_count_data), group = rat_2_group) %>%
+  calcNormFactors("TMM") %>%
+  estimateDisp(rat_2_design, robust = TRUE) %>%
+  glmFit(rat_2_design)
+
+rownames(rat_2_fit$counts) <- rat_2_filtered_count_data %>% rownames()
+
+rat_2_lrt1 <- purrr::map(seq_len(n_sets), function(i) glmLRT(rat_2_fit, contrast = rat_2_contr_matrix[, i]))
+
+rat_2_edgeR_results <- purrr::map(seq_along(rat_2_lrt1), function(i) topTags(rat_2_lrt1[[i]], n = nrow(rat_2_lrt1[[i]]), sort.by = "p.value"))
+
+rat_2_edgeR_results <- purrr::map(seq_along(rat_2_edgeR_results), function(i) rat_2_edgeR_results[[i]]$table) %>%
+  purrr::map(rownames_to_column, var = "ensembl_gene_id") %>%
+  purrr::map(mutate, pi_value = abs(logFC) * (-1) * log10(FDR)) %>%
+  purrr::map(dplyr::arrange, FDR)
+
+rat_2_edgeR_results <- rat_2_edgeR_results %>% 
+  purrr::map(mutate, up_down = dplyr::if_else(condition = logFC > 0, true = "up", false = "down"))
+
+rat_2_edgeR_results <- rat_2_edgeR_results %>% 
+  purrr::map(mutate, DEG_status = dplyr::if_else(condition = logFC > 1 & FDR < 0.05, true = "Up", false = dplyr::if_else(condition = logFC < -1 & FDR < 0.05, true = "Down", false = "Not_DEG"))) 
+
+rat_2_edgeR_results <- rat_2_edgeR_results %>%
+  purrr::map(left_join, rat_gene_id_dict, by = "ensembl_gene_id") %>% 
+  purrr::map(dplyr::select, c(ensembl_gene_id, entrezgene_id, rgd_symbol, gene_biotype), everything()) %>% 
+  purrr::set_names(rat_2_comparisons_v)
+
+rat_2_edgeR_results <- rat_2_edgeR_results %>% 
+  purrr::map(mutate_at, .vars = c("logFC", "logCPM", "LR", "pi_value"), .funs = round, digits = 2) %>% 
+   purrr::map(mutate_at, .vars = c("PValue", "FDR"), .funs = formatC, digits = 2, format = "e") 
+
+rat_2_edgeR_results <- rat_2_edgeR_results %>% 
+  purrr::map(mutate, length = end_position - start_position)
+
+rat_2_edgeR_results <- rat_2_edgeR_results %>% 
+  purrr::map(mutate, gene_biotype_1 = gene_biotype) %>% 
+  purrr::map(mutate, gene_biotype_1 = dplyr::if_else(gene_biotype_1 == "protein_coding", true = gene_biotype_1, false = dplyr::if_else(length < 200, true = "miRNA", false = "lncRNA")))
+
+rat_2_edgeR_topDE_1 <- rat_2_edgeR_results %>% purrr::map(dplyr::filter, as.numeric(FDR) < threshold)
+
+rat_2_edgeR_topDE_2 <- rat_2_edgeR_topDE_1 %>% purrr::map(filter, abs(logFC) >= LFC)
+
+rat_2_edgeR_DE_names <- rat_2_edgeR_topDE_2 %>%
+  purrr::map(dplyr::select, ensembl_gene_id) %>%
+  purrr::map(pull)
+
+rat_2_edgeR_n_DEGs <- rat_2_edgeR_DE_names %>% purrr::map(length)
+```
+
+
+# Volcano plot
+```{r}
+rat_2_volcano_plot_Ct25_x_Ct3 <- rat_2_edgeR_results$Ct25_x_Ct3 %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+                     labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  xlim(c(-10.5, 10.5)) + ylim(c(0, 315)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+rat_2_volcano_plot_Ct25_x_Ct3 %>%
+  ggsave(filename = paste0(path_to_data, "rat_2_volcano_plot_Ct25_x_Ct3.png"), device = "png", dpi = 900, width = 10, height = 5)
+
+rat_2_volcano_plot_G3_x_Ct3 <- rat_2_edgeR_results$G3_x_Ct3 %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+                     labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  xlim(c(-4.5, 4.5)) + ylim(c(0, 1)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+rat_2_volcano_plot_G3_x_Ct3 %>%
+  ggsave(filename = paste0(path_to_data, "rat_2_volcano_plot_G3_x_Ct3.png"), device = "png", dpi = 900, width = 10, height = 5)
+
+rat_2_volcano_plot_M3_x_Ct3 <- rat_2_edgeR_results$M3_x_Ct3 %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  # scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+  #                    labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  scale_color_manual(values = c("Not_DEG" = "black"),
+                     labels = c("Not significant")) +
+  xlim(c(-4, 4)) + ylim(c(0, 3)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+rat_2_volcano_plot_M3_x_Ct3 %>%
+  ggsave(filename = paste0(path_to_data, "rat_2_volcano_plot_M3_x_Ct3.png"), device = "png", dpi = 900, width = 10, height = 5)
+```
+
+# Heatmap with ggplot
+# from https://stackoverflow.com/questions/42047896/joining-a-dendrogram-and-a-heatmap
+```{r}
+rat_2_DEG_set <- rat_2_edgeR_DE_names %>% unlist() %>% unique() %>% sort()
+
+rat_2_df <- rat_2_edgeR_results %>% 
+  purrr::map(dplyr::select, c(ensembl_gene_id, rgd_symbol, logFC)) %>% 
+  purrr::reduce(full_join, by = c("ensembl_gene_id", "rgd_symbol")) %>% 
+  purrr::set_names("ensembl_gene_id", "rgd_symbol", rat_2_comparisons_v) %>% 
+  dplyr::filter(ensembl_gene_id %in% rat_2_DEG_set) %>% 
+  unite(ensembl_gene_id:rgd_symbol, col = "gene") %>% 
+  # arrange() %>% 
+  distinct(gene, .keep_all = TRUE) %>% 
+  column_to_rownames(var = "gene")
+  
+
+# gene_pos_table %>% vroom::vroom_write(file = paste0(path_to_files, "gene_pos_table.tsv"), delim = "\t")
+
+rat_2_heatmap_dendro_fig <- rat_2_df %>% 
+    plot_heatmap_and_dendro()
+
+# rat_2_heatmap_dendro_fig %>%
+#   ggsave(filename = paste0(path_to_files, "rat_2_DEGs_heatmap.png"), device = "png", height = 8, width = 10, dpi = 900)
+```
+
+# Venn Diagram - Rat_2
+```{r}
+draw.pairwise.venn(
+  area1 = rat_2_edgeR_DE_names$Ct25_x_Ct3 %>% length(),
+  area2 = rat_2_edgeR_DE_names$M3_x_Ct3 %>% length(),
+  cross.area = intersect(rat_2_edgeR_DE_names$Ct25_x_Ct3, rat_2_edgeR_DE_names$M3_x_Ct3) %>% length(), 
+  fill = c(brewer.pal(4, "Dark2")[1], brewer.pal(4, "Dark2")[4]), 
+  scaled = FALSE, 
+  category = c("Ct25_x_Ct3", "M3_x_Ct3"), 
+  cat.pos = c(0, 0), 
+  cat.cex = c(2, 2), 
+  cex = 1.5
+  )
+```
+
+```{r}
+rat_2_n_DEGs <- rat_2_edgeR_topDE_2 %>% purrr::map(nrow) %>% bind_rows() %>% t() %>% as.data.frame()
+
+rat_2_up_DEGs <- rat_2_edgeR_topDE_2 %>% purrr::map(dplyr::filter, logFC > 0) %>% purrr::map(nrow) %>% bind_rows() %>% t() %>% as.data.frame()
+
+rat_2_down_DEGs <- rat_2_edgeR_topDE_2 %>% purrr::map(dplyr::filter, logFC < 0) %>% purrr::map(nrow) %>% bind_rows() %>% t() %>% as.data.frame()
+
+rat_2_n_DEGs %>% bind_cols(rat_2_up_DEGs) %>% bind_cols(rat_2_down_DEGs) %>% purrr::set_names(c("DEGs", "Up", "Down")) %>% rownames_to_column("Comparison") %>% DT::datatable(options = list(columnDefs = list(list(className = "dt-center", targets = "_all"))))
+```
+
+```{r}
+rat_2_edgeR_results_table <- rat_2_edgeR_results %>% 
+  purrr::map(mutate_at, .vars = c("PValue", "FDR"), .funs = formatC, digits = 2, format = "e") %>% 
+  purrr::map(dplyr::select, c("ensembl_gene_id", "entrezgene_id", "rgd_symbol", "gene_biotype", "description", "chromosome_name", "start_position", "end_position", "logFC", "PValue", "FDR")) %>% 
+  purrr::reduce(full_join, by = c("ensembl_gene_id", "entrezgene_id", "rgd_symbol", "gene_biotype", "description", "chromosome_name", "start_position", "end_position")) %>% 
+  purrr::set_names(c("ensembl_gene_id", "entrezgene_id", "rgd_symbol", "gene_biotype", "description", "chromosome_name", "start_position", "end_position", "LFC_Ct25_x_Ct3", "p_value_Ct25_x_Ct3", "FDR_Ct25_x_Ct3", "LFC_G3_x_Ct3", "p_value_G3_x_Ct3", "FDR_G3_x_Ct3", "LFC_M3_x_Ct3", "p_value_M3_x_Ct3", "FDR_M3_x_Ct3")) %>% 
+  full_join(rat_2_filtered_count_data %>% as.data.frame() %>% rownames_to_column(var = "ensembl_gene_id")) %>% 
+  arrange(ensembl_gene_id)
+
+# rat_2_edgeR_results_table %>% vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/rat_2_edgeR_results_table.tsv", delim = "\t", col_names = TRUE)
+rat_2_edgeR_results_table %>% vroom::vroom_write(file = paste0(path_to_data, "rat_2_edgeR_results_table.tsv"), delim = "\t", col_names = TRUE)
+```
+
+# DEG boxplots - Rat 2 - cpm
+```{r}
+# rat_2_DEGs <- union(rat_2_edgeR_DE_names$Ct25_x_Ct3, rat_2_edgeR_DE_names$M3_x_Ct3)
+
+# Mplus_x_M
+rat_2_gene_table_2_boxplot <- rat_2_filtered_count_data %>% 
+  edgeR::cpm() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "ensembl_gene_id") %>% 
+  left_join(rat_gene_id_dict, by = "ensembl_gene_id") %>% 
+  # dplyr::filter(ensembl_gene_id %in% rat_2_genes) %>% 
+  mutate(gene = paste0(ensembl_gene_id, " (", rgd_symbol, ")" )) %>% 
+  pivot_longer(cols = Ct3A:M3C, names_to = "Sample", values_to = "read_count") %>% 
+  dplyr::mutate(Sample = Sample %>% dplyr::recode(Ct3A = "Ct3", Ct3B = "Ct3", Ct3C = "Ct3", Ct25A = "Ct25", Ct25B = "Ct25", Ct25C = "Ct25", G3A = "G3", G3B = "G3", G3C = "G3", M3A = "M3", M3B = "M3", M3C = "M3")) %>% 
+  mutate(Sample = Sample %>% factor(levels = c("Ct3", "Ct25", "G3", "M3"))) %>% 
+  dplyr::select(gene, Sample, read_count)
+
+rat_2_gene_title <- rat_2_gene_table_2_boxplot$gene %>% unique()
+
+rat_2_gene_boxplot_list <- purrr::map(seq_len(nrow(rat_2_filtered_count_data)), function(i){
+  print(i)
+  rat_2_gene_table_2_boxplot %>% 
+    dplyr::filter(gene == rat_2_gene_title[i]) %>% 
+    ggplot(aes(x = Sample, y = read_count, fill = Sample)) + 
+    geom_boxplot() +
+    geom_point() +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    scale_fill_brewer(palette = "Dark2") +
+    labs(x = "", y = "Normalized read count (CPM)", title = rat_2_gene_title[i]) +
+    theme_bw() +
+    ggeasy::easy_all_text_size(size = 20)
+})
+
+# Save figures
+# purrr::map(seq_along(rat_2_gene_boxplot_list), function(i) {
+#   print(i)
+#   rat_2_gene_boxplot_list[[i]] %>% ggsave(filename = paste0(path_to_data, "rat_2_DEG_cpm_boxplots/", rat_2_gene_title[i], "_cpm_boxplot.png"), width = 7, height = 5, dpi = 900)
+#   })
+```
+
+# DEG boxplots - Rat 2 - raw
+```{r}
+# rat_2_DEGs <- union(rat_2_edgeR_DE_names$Ct25_x_Ct3, rat_2_edgeR_DE_names$M3_x_Ct3)
+
+# Mplus_x_M
+rat_2_gene_table_2_boxplot <- rat_2_filtered_count_data %>% 
+  # edgeR::cpm() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "ensembl_gene_id") %>% 
+  left_join(rat_gene_id_dict, by = "ensembl_gene_id") %>% 
+  # dplyr::filter(ensembl_gene_id %in% rat_2_genes) %>% 
+  mutate(gene = paste0(ensembl_gene_id, " (", rgd_symbol, ")" )) %>% 
+  pivot_longer(cols = Ct3A:M3C, names_to = "Sample", values_to = "read_count") %>% 
+  dplyr::mutate(Sample = Sample %>% dplyr::recode(Ct3A = "Ct3", Ct3B = "Ct3", Ct3C = "Ct3", Ct25A = "Ct25", Ct25B = "Ct25", Ct25C = "Ct25", G3A = "G3", G3B = "G3", G3C = "G3", M3A = "M3", M3B = "M3", M3C = "M3")) %>% 
+  mutate(Sample = Sample %>% factor(levels = c("Ct3", "Ct25", "G3", "M3"))) %>% 
+  dplyr::select(gene, Sample, read_count)
+
+rat_2_gene_title <- rat_2_gene_table_2_boxplot$gene %>% unique()
+
+rat_2_gene_boxplot_list <- purrr::map(seq_len(nrow(rat_2_filtered_count_data)), function(i){
+  print(i)
+  rat_2_gene_table_2_boxplot %>% 
+    dplyr::filter(gene == rat_2_gene_title[i]) %>% 
+    ggplot(aes(x = Sample, y = read_count, fill = Sample)) + 
+    geom_boxplot() +
+    geom_point() +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    scale_fill_brewer(palette = "Dark2") +
+    labs(x = "", y = "Raw read count", title = rat_2_gene_title[i]) +
+    theme_bw() +
+    ggeasy::easy_all_text_size(size = 20)
+})
+
+# Save figures
+purrr::map(seq_along(rat_2_gene_boxplot_list), function(i) {
+  print(i)
+  rat_2_gene_boxplot_list[[i]] %>% ggsave(filename = paste0(path_to_data, "rat_2_DEG_raw_boxplots/", rat_2_gene_title[i], "_raw_boxplot.png"), width = 7, height = 5, dpi = 900)
+  })
+```
+
+# Mouse
+```{r, message=FALSE, warning=FALSE}
+threshold <- 0.05
+LFC <- 1
+n_sets <- 4
+
+mouse_contr_matrix <- makeContrasts(
+  # con1 = W - M,
+  # con2 = Wplus - Mplus,
+  con1 = M - W,
+  con2 = Mplus - Wplus,
+  con3 = Mplus - M,
+  con4 = Wplus - W,
+  levels = c("W",
+             "Wplus",
+             "M",
+             "Mplus")
+)
+
+# edgeR pipeline
+mouse_fit <- mouse_filtered_count_data %>%
+# mouse_fit <- mouse_set2$normalizedCounts %>%
+  DGEList(lib.size = colSums(mouse_filtered_count_data), group = mouse_group) %>%
+  calcNormFactors("TMM") %>%
+  estimateDisp(mouse_design, robust = TRUE) %>%
+  glmFit(mouse_design)
+
+rownames(mouse_fit$counts) <- mouse_filtered_count_data %>% rownames()
+
+mouse_lrt1 <- purrr::map(seq_len(n_sets), function(i) glmLRT(mouse_fit, contrast = mouse_contr_matrix[, i]))
+
+mouse_edgeR_results <- purrr::map(seq_along(mouse_lrt1), function(i) topTags(mouse_lrt1[[i]], n = nrow(mouse_lrt1[[i]]), sort.by = "p.value"))
+
+mouse_edgeR_results <- purrr::map(seq_along(mouse_edgeR_results), function(i) mouse_edgeR_results[[i]]$table) %>%
+  purrr::map(rownames_to_column, var = "ensembl_gene_id") %>%
+  purrr::map(mutate, pi_value = abs(logFC) * (-1) * log10(FDR)) %>%
+  purrr::map(dplyr::arrange, FDR)
+
+mouse_edgeR_results <- mouse_edgeR_results %>% 
+  purrr::map(mutate, up_down = dplyr::if_else(condition = logFC > 0, true = "up", false = "down"))
+
+mouse_edgeR_results <- mouse_edgeR_results %>% 
+  purrr::map(mutate, DEG_status = dplyr::if_else(condition = logFC > 1 & FDR < 0.05, true = "Up", false = dplyr::if_else(condition = logFC < -1 & FDR < 0.05, true = "Down", false = "Not_DEG"))) 
+
+mouse_edgeR_results <- mouse_edgeR_results %>%
+  purrr::map(left_join, mouse_gene_id_dict, by = "ensembl_gene_id") %>% 
+  purrr::map(dplyr::select, c(ensembl_gene_id, entrezgene_id, mgi_symbol, gene_biotype), everything()) %>% 
+  purrr::set_names(mouse_comparisons_v)
+
+mouse_edgeR_results <- mouse_edgeR_results %>% 
+  purrr::map(mutate_at, .vars = c("logFC", "logCPM", "LR", "pi_value"), .funs = round, digits = 2) %>% 
+  purrr::map(mutate_at, .vars = c("PValue", "FDR"), .funs = formatC, digits = 2, format = "e") 
+
+mouse_edgeR_results <- mouse_edgeR_results %>% 
+  purrr::map(mutate, length = end_position - start_position)
+
+mouse_edgeR_results <- mouse_edgeR_results %>% 
+  purrr::map(mutate, gene_biotype_1 = gene_biotype) %>% 
+  purrr::map(mutate, gene_biotype_1 = dplyr::if_else(gene_biotype_1 == "protein_coding", true = gene_biotype_1, false = dplyr::if_else(length < 200, true = "miRNA", false = "lncRNA")))
+
+mouse_edgeR_topDE_1 <- mouse_edgeR_results %>% purrr::map(dplyr::filter, as.numeric(FDR) < threshold)
+
+mouse_edgeR_topDE_2 <- mouse_edgeR_topDE_1 %>% purrr::map(filter, abs(logFC) >= LFC)
+
+mouse_edgeR_DE_names <- mouse_edgeR_topDE_2 %>%
+  purrr::map(dplyr::select, ensembl_gene_id) %>%
+  purrr::map(pull)
+
+mouse_edgeR_n_DEGs <- mouse_edgeR_DE_names %>% purrr::map(length)
+```
+
+# Volcano plot
+```{r}
+mouse_volcano_plot_W_x_M <- mouse_edgeR_results$W_x_M %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+                     labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  xlim(c(-10, 10)) + ylim(c(0, 75)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+# mouse_volcano_plot_W_x_M %>%
+#   ggsave(filename = paste0(path_to_data, "mouse_volcano_plot_W_x_M.png"), device = "png", dpi = 900, width = 10, height = 5)
+
+mouse_volcano_plot_Wplus_x_Mplus <- mouse_edgeR_results$Wplus_x_Mplus %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+                     labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  xlim(c(-9, 9)) + ylim(c(0, 70)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+# mouse_volcano_plot_Wplus_x_Mplus %>%
+#   ggsave(filename = paste0(path_to_data, "mouse_volcano_plot_Wplus_x_Mplus.png"), device = "png", dpi = 900, width = 10, height = 5)
+
+mouse_volcano_plot_Mplus_x_M <- mouse_edgeR_results$Mplus_x_M %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+                     labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  xlim(c(-12, 12)) + ylim(c(0, 75)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+# mouse_volcano_plot_Mplus_x_M %>%
+#   ggsave(filename = paste0(path_to_data, "mouse_volcano_plot_Mplus_x_M.png"), device = "png", dpi = 900, width = 10, height = 5)
+
+mouse_volcano_plot_Wplus_x_W <- mouse_edgeR_results$Wplus_x_W %>%
+  ggplot(aes(x = logFC, y = -log10(as.numeric(FDR)), colour = DEG_status)) +
+  geom_point(alpha = 0.4, size = 1 / 2) +
+  theme_bw() +
+  scale_color_manual(values = c("Down" = "#094FED", "Not_DEG" = "black", "Up" = "red"),
+                     labels = c("Downregulated DEG", "Not significant", "Upregulated DEG")) +
+  xlim(c(-13, 13)) + ylim(c(0, 64)) +
+  labs(x = "log2 Fold Change", y = "-log10 adjusted p-value") +
+  theme(legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(size = 5))) + # change size of dots in legend
+  theme(legend.position = "bottom") +
+  easy_all_text_size(size = 20)
+
+# mouse_volcano_plot_Wplus_x_W %>%
+  # ggsave(filename = paste0(path_to_data, "mouse_volcano_plot_Wplus_x_W.png"), device = "png", dpi = 900, width = 10, height = 5)
+```
+
+# Save tpm table
+```{r}
+# mouse_filtered_count_data %>% cpm() %>% as.data.frame() %>%  vroom::vroom_write(file = paste0(path_to_data, "mouse_filtered_count_data_tpm.tsv"), delim = "/t")
+```
+
+# Heatmap with ggplot
+# from https://stackoverflow.com/questions/42047896/joining-a-dendrogram-and-a-heatmap
+```{r}
+mouse_DEG_set <- mouse_edgeR_DE_names %>% unlist() %>% unique() %>% sort()
+
+mouse_df <- mouse_edgeR_results %>% 
+  purrr::map(dplyr::select, c(ensembl_gene_id, mgi_symbol, logFC)) %>% 
+  purrr::reduce(full_join, by = c("ensembl_gene_id", "mgi_symbol")) %>% 
+  purrr::set_names("ensembl_gene_id", "mgi_symbol", mouse_comparisons_v) %>% 
+  dplyr::filter(ensembl_gene_id %in% mouse_DEG_set) %>% 
+  unite(ensembl_gene_id:mgi_symbol, col = "gene") %>% 
+  # arrange() %>% 
+  distinct(gene, .keep_all = TRUE) %>% 
+  column_to_rownames(var = "gene")
+  
+
+# gene_pos_table %>% vroom::vroom_write(file = paste0(path_to_files, "gene_pos_table.tsv"), delim = "\t")
+
+mouse_heatmap_dendro_fig <- mouse_df %>% 
+    plot_heatmap_and_dendro()
+
+# mouse_heatmap_dendro_fig %>%
+#   ggsave(filename = paste0(path_to_data, "mouse_DEGs_heatmap.png"), device = "png", height = 8, width = 10, dpi = 900)
+```
+
+# Venn Diagram - Mouse
+```{r}
+draw.quad.venn(
+  area1 = mouse_edgeR_DE_names[[1]] %>% length(),
+  area2 = mouse_edgeR_DE_names[[2]] %>% length(),
+  area3 = mouse_edgeR_DE_names[[3]] %>% length(),
+  area4 = mouse_edgeR_DE_names[[4]] %>% length(),
+  n12 = intersect(mouse_edgeR_DE_names[[1]], mouse_edgeR_DE_names[[2]]) %>% length(),
+  n13 = intersect(mouse_edgeR_DE_names[[1]], mouse_edgeR_DE_names[[3]]) %>% length(),
+  n14 = intersect(mouse_edgeR_DE_names[[1]], mouse_edgeR_DE_names[[4]]) %>% length(),
+  n23 = intersect(mouse_edgeR_DE_names[[2]], mouse_edgeR_DE_names[[3]]) %>% length(),
+  n24 = intersect(mouse_edgeR_DE_names[[2]], mouse_edgeR_DE_names[[4]]) %>% length(),
+  n34 = intersect(mouse_edgeR_DE_names[[3]], mouse_edgeR_DE_names[[4]]) %>% length(),
+  n123 = intersect(mouse_edgeR_DE_names[[1]], 
+                   intersect(mouse_edgeR_DE_names[[2]], mouse_edgeR_DE_names[[3]])) %>% length(),
+  n124 = intersect(mouse_edgeR_DE_names[[1]], 
+                   intersect(mouse_edgeR_DE_names[[2]], mouse_edgeR_DE_names[[4]])) %>% length(),
+  n134 = intersect(mouse_edgeR_DE_names[[1]], 
+                   intersect(mouse_edgeR_DE_names[[3]], mouse_edgeR_DE_names[[4]])) %>% length(),
+  n234 = intersect(mouse_edgeR_DE_names[[2]], 
+                   intersect(mouse_edgeR_DE_names[[3]], mouse_edgeR_DE_names[[4]])) %>% length(),
+  n1234 = intersect(mouse_edgeR_DE_names[[1]], 
+                   intersect(mouse_edgeR_DE_names[[2]], 
+                             intersect(mouse_edgeR_DE_names[[3]], mouse_edgeR_DE_names[[4]]))) %>% length(),
+  fill = brewer.pal(4, "Set1"), 
+  scaled = FALSE, 
+  category = c("W_x_M", "Wplus_x_Mplus", "Mplus_x_M", "Wplus_x_W"), 
+  cat.pos = c(350, 0, 0, 360), 
+  cat.cex = c(2, 2, 2, 2), 
+  cex = 1.5
+  )
+```
+
+```{r}
+mouse_n_DEGs <- mouse_edgeR_topDE_2 %>% purrr::map(nrow) %>% bind_rows() %>% t() %>% as.data.frame()
+
+mouse_up_DEGs <- mouse_edgeR_topDE_2 %>% purrr::map(dplyr::filter, logFC > 0) %>% purrr::map(nrow) %>% bind_rows() %>% t() %>% as.data.frame()
+
+mouse_down_DEGs <- mouse_edgeR_topDE_2 %>% purrr::map(dplyr::filter, logFC < 0) %>% purrr::map(nrow) %>% bind_rows() %>% t() %>% as.data.frame()
+
+mouse_n_DEGs %>% bind_cols(mouse_up_DEGs) %>% bind_cols(mouse_down_DEGs) %>% purrr::set_names(c("DEGs", "Up", "Down")) %>% rownames_to_column("Comparison") %>% DT::datatable(options = list(columnDefs = list(list(className = "dt-center", targets = "_all"))))
+```
+
+```{r}
+mouse_edgeR_results_table <- mouse_edgeR_results %>% 
+  purrr::map(mutate_at, .vars = c("PValue", "FDR"), .funs = formatC, digits = 2, format = "e") %>% 
+  purrr::map(dplyr::select, c("ensembl_gene_id", "entrezgene_id", "mgi_symbol", "gene_biotype", "description", "chromosome_name", "start_position", "end_position",  "logFC", "PValue", "FDR")) %>% 
+  purrr::reduce(full_join, b = c("ensembl_gene_id", "entrezgene_id", "mgi_symbol", "gene_biotype", "description", "chromosome_name", "start_position", "end_position")) %>% 
+  purrr::set_names(c("ensembl_gene_id", "entrezgene_id", "mgi_symbol", "gene_biotype", "description", "chromosome_name", "start_position", "end_position", "LFC_W_x_M", "p_value_W_x_M", "FDR_W_x_M", "LFC_Wplus_x_Mplus", "p_value_Wplus_x_Mplus", "FDR_Wplus_x_Mplus", "LFC_Mplus_x_M", "p_value_Mplus_x_M", "FDR_Mplus_x_M", "LFC_Wplus_x_W", "p_value_Wplus_x_W", "FDR_Wplus_x_W")) %>% 
+  full_join(mouse_filtered_count_data %>% as.data.frame() %>% rownames_to_column(var = "ensembl_gene_id")) %>% 
+  arrange(ensembl_gene_id)
+
+mouse_edgeR_results_table %>% vroom::vroom_write(file = paste0(path_to_data, "mouse_edgeR_results_table.tsv"), delim = "\t", col_names = TRUE)
+```
+
+# genes boxplots - Mouse
+```{r}
+# mouse_DEGs <- union(mouse_edgeR_DE_names$Wplus_x_W, mouse_edgeR_DE_names$Mplus_x_M)
+
+# Mplus_x_M
+mouse_gene_table_2_boxplot <- mouse_filtered_count_data %>% 
+  edgeR::cpm() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ensembl_gene_id") %>% 
+  left_join(mouse_gene_id_dict, by = "ensembl_gene_id") %>% 
+  # dplyr::filter(ensembl_gene_id %in% mouse_genes) %>% 
+  mutate(gene = paste0(ensembl_gene_id, " (", mgi_symbol, ")" )) %>% 
+  pivot_longer(cols = M1:W3plus, names_to = "Sample", values_to = "read_count") %>% 
+  dplyr::mutate(Sample = Sample %>% dplyr::recode(M1 = "MUT", M2 = "MUT", M3 = "MUT", M1plus = "MUTplus", M2plus = "MUTplus", M3plus = "MUTplus", W1 = "WT", W2 = "WT", W3 = "WT", W1plus = "WTplus", W2plus = "WTplus", W3plus = "WTplus")) %>% 
+  mutate(Sample = Sample %>% factor(levels = c("MUT", "MUTplus", "WT", "WTplus"))) %>% 
+  dplyr::select(gene, Sample, read_count)
+
+mouse_gene_title <- mouse_gene_table_2_boxplot$gene %>% unique()
+
+mouse_gene_boxplot_list <- purrr::map(seq_len(nrow(mouse_filtered_count_data)), function(i){
+  print(i)
+  mouse_gene_table_2_boxplot %>% 
+    dplyr::filter(gene == mouse_gene_title[i]) %>% 
+    ggplot(aes(x = Sample, y = read_count, fill = Sample)) + 
+    geom_boxplot() +
+    geom_point() +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    scale_fill_brewer(palette = "Dark2") +
+    labs(x = "", y = "Normalized read count (CPM)", title = mouse_gene_title[i]) +
+    theme_bw() +
+    ggeasy::easy_all_text_size(size = 20)
+})
+
+```
+
+# Save boxplot figures
+```{r}
+# purrr::map(seq_along(rat_1_gene_boxplot_list), function(i) {
+#   print(i)
+#   rat_1_gene_boxplot_list[[i]] %>% ggsave(filename = paste0("/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/Physiology_Institute_RNA_Seq/rat_1_DEG_cpm_boxplots/", rat_1_gene_title[i], "_cpm_boxplot.png"), width = 7, height = 5, dpi = 900)
+#   })
+
+# purrr::map(seq_along(rat_2_gene_boxplot_list), function(i) {
+#   print(i)
+#   rat_2_gene_boxplot_list[[i]] %>% ggsave(filename = paste0("/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/Physiology_Institute_RNA_Seq/rat_2_DEG_boxplots/", rat_2_DEG_title[i], "_cpm_boxplot.png"), width = 7, height = 5, dpi = 900)
+#   })
+
+# purrr::map(seq_along(mouse_gene_boxplot_list), function(i) {
+#   print(i)
+#   mouse_gene_boxplot_list[[i]] %>% ggsave(filename = paste0("/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/Physiology_Institute_RNA_Seq/mouse_DEG_cpm_boxplots/", mouse_gene_title[i], "_cpm_boxplot.png"), width = 7, height = 5, dpi = 900)
+#   })
+
+purrr::map(seq_along(mouse_gene_boxplot_list), function(i) {
+  print(i)
+  mouse_gene_boxplot_list[[i]] %>% ggsave(filename = paste0(path_to_data, "/mouse_DEG_cpm_boxplots/", mouse_gene_title[i], "_cpm_boxplot.png"), width = 7, height = 5, dpi = 900)
+  })
+
+# purrr::map(seq_along(mouse_gene_boxplot_list), function(i) {
+#   print(i)
+#   mouse_gene_boxplot_list[[i]] %>% ggsave(filename = paste0("~/PRIMUS/data/83_BIOINFORMATICS/Kadu/Physiology_Institute_RNA_Seq/mouse_DEG_boxplots/", mouse_gene_title[i], "_cpm_boxplot.png"), width = 7, height = 5, dpi = 900)
+#   })
+```
+
+
+# genes boxplots - Mouse - raw read count
+```{r}
+# mouse_DEGs <- union(mouse_edgeR_DE_names$Wplus_x_W, mouse_edgeR_DE_names$Mplus_x_M)
+
+# Mplus_x_M
+mouse_gene_table_2_boxplot <- mouse_filtered_count_data %>% 
+  edgeR::cpm() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ensembl_gene_id") %>% 
+  left_join(mouse_gene_id_dict, by = "ensembl_gene_id") %>% 
+  # dplyr::filter(ensembl_gene_id %in% mouse_genes) %>% 
+  mutate(gene = paste0(ensembl_gene_id, " (", mgi_symbol, ")" )) %>% 
+  pivot_longer(cols = M1:W3plus, names_to = "Sample", values_to = "read_count") %>% 
+  dplyr::mutate(Sample = Sample %>% dplyr::recode(M1 = "MUT", M2 = "MUT", M3 = "MUT", M1plus = "MUTplus", M2plus = "MUTplus", M3plus = "MUTplus", W1 = "WT", W2 = "WT", W3 = "WT", W1plus = "WTplus", W2plus = "WTplus", W3plus = "WTplus")) %>% 
+  mutate(Sample = Sample %>% factor(levels = c("MUT", "MUTplus", "WT", "WTplus"))) %>% 
+  dplyr::select(gene, Sample, read_count)
+
+mouse_gene_title <- mouse_gene_table_2_boxplot$gene %>% unique()
+
+mouse_gene_boxplot_list <- purrr::map(seq_len(nrow(mouse_filtered_count_data)), function(i){
+  print(i)
+  mouse_gene_table_2_boxplot %>% 
+    dplyr::filter(gene == mouse_gene_title[i]) %>% 
+    ggplot(aes(x = Sample, y = read_count, fill = Sample)) + 
+    geom_boxplot() +
+    geom_point() +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    scale_fill_brewer(palette = "Dark2") +
+    labs(x = "", y = "Raw read count", title = mouse_gene_title[i]) +
+    theme_bw() +
+    ggeasy::easy_all_text_size(size = 20)
+})
+
+# Save boxplot figures
+purrr::map(seq_along(mouse_gene_boxplot_list), function(i) {
+  print(i)
+  mouse_gene_boxplot_list[[i]] %>% ggsave(filename = paste0(path_to_data, "mouse_DEG_raw_boxplots/", mouse_gene_title[i], "_raw_boxplot.png"), width = 7, height = 5, dpi = 900)
+  })
+```
+
+# Enrichment analysis - ORA
+# Databases
+```{r}
+# path_to_pathways <- "~/Dropbox/GMT/"
+path_to_pathways <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/GMT/"
+# path_to_pathways <- "C:\\Users\\Carlos\\Dropbox\\GMT\\"
+WikiPathways_2019_Human <- path_to_pathways %>% paste0("WikiPathways_2019_Human.txt") # WikiPathways_2019_Human gene sets
+WikiPathways_2019_Mouse <- path_to_pathways %>% paste0("WikiPathways_2019_Mouse.txt") # WikiPathways_2019_Mouse gene sets
+KEGG_2019_Human <- path_to_pathways %>% paste0("KEGG_2019_Human.txt") # KEGG_2019_Human gene sets
+KEGG_2019_Mouse <- path_to_pathways %>% paste0("KEGG_2019_Mouse.txt") # KEGG_2019_Mouse gene sets
+LINCS_L1000_Chem_Pert_down <- path_to_pathways %>% paste0("LINCS_L1000_Chem_Pert_down.txt") # LINCS_L1000_Chem_Pert_down gene sets
+LINCS_L1000_Chem_Pert_up <- path_to_pathways %>% paste0("LINCS_L1000_Chem_Pert_up.txt") # LINCS_L1000_Chem_Pert_up gene sets
+Reactome_2016 <- path_to_pathways %>% paste0("Reactome_2016.txt") # Reactome_2016 gene sets
+GO_Molecular_Function_2018 <- path_to_pathways %>% paste0("GO_Molecular_Function_2018.txt") # GO_Molecular_Function_2018 gene sets
+GO_Cellular_Component_2018 <- path_to_pathways %>% paste0("GO_Cellular_Component_2018.txt") # GO_Cellular_Component_2018 gene sets
+GO_Biological_Process_2018 <- path_to_pathways %>% paste0("GO_Biological_Process_2018.txt") # GO_Biological_Process_2018 gene sets
+GO_Molecular_Function_2021 <- path_to_pathways %>% paste0("GO_Molecular_Function_2021.txt") # GO_Molecular_Function_2021 gene sets
+GO_Cellular_Component_2021 <- path_to_pathways %>% paste0("GO_Cellular_Component_2021.txt") # GO_Cellular_Component_2021 gene sets
+GO_Biological_Process_2021 <- path_to_pathways %>% paste0("GO_Biological_Process_2021.txt") # GO_Biological_Process_2021 gene sets
+BioPlanet_2019 <- path_to_pathways %>% paste0("BioPlanet_2019.txt") # BioPlanet_2019 gene sets
+# BioPlanet_pathways<- "~/Dropbox/GMT/BioPlanet_pathways.csv" # BioPlanet_pathways gene sets
+```
+
+# ORA and GSEA custom functions
+```{r}
+ora_analysis <- function(genes_list, database = KEGG_2019_Human, pvalue_cutoff = 1, qvalue_cutoff = 1, p.adjust_cutoff = 0.1, count_at_least = 3){
+  library(clusterProfiler)
+  library(tidyverse)
+  gmt_df <- database %>% clusterProfiler::read.gmt()
+  terms_list <- gmt_df %>% split(f = .$term) %>% purrr::map(pull, gene)
+  genes_set <- gmt_df[, "gene"] %>% unique()
+  enrichment_result <- genes_list %>% 
+    purrr::map(clusterProfiler::enricher, pvalueCutoff = pvalue_cutoff, qvalueCutoff = qvalue_cutoff, universe = genes_set, TERM2GENE = gmt_df)
+  clProf.df <- enrichment_result %>% purrr::map(as.data.frame) %>% bind_rows(.id = "Cluster")
+  clProf.df <- clProf.df %>% dplyr::filter(p.adjust < p.adjust_cutoff & Count >= count_at_least)
+  geneClusters <- genes_list
+  compareCluster_output <- new("compareClusterResult", 
+                               compareClusterResult = clProf.df, 
+                               geneClusters = list(geneClusters), 
+                               fun = "enricher",
+                               .call = match.call(expand.dots = TRUE))
+  return(compareCluster_output)
+}
+
+shape_data <- function(ora_results_output) {
+  ora_results_output@compareClusterResult <- ora_results_output@compareClusterResult %>% 
+    mutate_at(.vars = c("pvalue", "p.adjust", "qvalue"), .funs = formatC, digits = 2, format = "e") 
+  return(ora_results_output)
+}
+
+# gsea_analysis <- function(sorted_genes, database = KEGG_2019_Human, ...) {
+#   library(clusterProfiler)
+#   library(stats)
+#   gmt_df <- database %>% clusterProfiler::read.gmt()
+#   gsea_result <- sorted_genes %>% GSEA(TERM2GENE = gmt_df, verbose = TRUE) %>% suppressWarnings()
+#   gene_set_ID <- gsea_result@result$Description
+#   gseaplot_results <- purrr::map(1:nrow(gsea_result@result), function(i) gsea_result %>% gseaplot(geneSetID = gene_set_ID[i]) + cowplot::draw_figure_label(label = gene_set_ID[i], size = 15)) %>% purrr::set_names(gene_set_ID)
+#   results <- list(gsea_results = gsea_result, 
+#                   gseaplot_results = gseaplot_results)
+#   return(results)
+# }
+
+# gsea_analysis <- function(database = KEGG_2019_Mouse, sorted_genes, p_adjust_cutoff = 0.05){
+#   library(clusterProfiler)
+#   library(fgsea)
+#   gmt_df <- database %>% clusterProfiler::read.gmt()
+#   gmt_list <- gmt_df %>% split(f = .$term) %>% purrr::map(pull, gene)
+#   fgsea_result <- fgsea(gmt_list, sorted_genes, nproc = 1, scoreType = "pos") %>%
+#     dplyr::filter(padj < p_adjust_cutoff) %>% 
+#     arrange(padj)
+#   gene_set_ID <- fgsea_result$pathway
+#   gseaplot_results <- purrr::map(1:nrow(fgsea_result), function(i) {
+#     plotEnrichment(pathway = gmt_list[[gene_set_ID[i]]], stats = sorted_genes) +
+#       labs(title = gene_set_ID[[i]],
+#        x = "Position in the Ranked List of Genes",
+#        y = "Running Enrichment Score") +
+#   ggeasy::easy_text_size(size = 15)}) %>% purrr::set_names(gene_set_ID)
+#     results <- list(gsea_results = fgsea_result,
+#                   gseaplot_results = gseaplot_results)
+#   return(results)
+# }
+
+gsea_analysis <- function(database = KEGG_2019_Mouse, sorted_genes, p_value_cutoff = 0.05, p_adjust_cutoff = 0.05, min_size = 10, max_size = 500, p_adjust_method = "BH") {
+  
+  # Load required packages
+  library(clusterProfiler)
+  library(tidyverse)
+
+  # Read the GMT file into a data frame
+  gmt_df <- database %>% clusterProfiler::read.gmt()
+
+  # Extract the gene sets (terms) from the GMT data frame
+  gmt_list <- gmt_df %>%
+    split(f = .$term) %>%
+    purrr::map(pull, gene)
+
+   # Perform Gene Set Enrichment Analysis (GSEA) using the sorted_genes and the database
+  gsea_result <- clusterProfiler::GSEA(
+    geneList = sorted_genes, 
+    TERM2GENE = gmt_df, 
+    verbose = FALSE, 
+    minGSSize = min_size, 
+    maxGSSize = max_size, 
+    pvalueCutoff = p_value_cutoff, 
+    pAdjustMethod = p_adjust_method
+    ) %>% suppressWarnings()
+
+  # Generate enrichment plots for each gene set and store them in a list
+  gseaplot_results <- purrr::map(gsea_result@result$Description, function(i) {
+    enrichplot::gseaplot2(
+      x = gsea_result,
+      geneSetID = i,
+      title = gsea_result@result$Description[i]
+    )
+  }) %>% purrr::set_names(gsea_result@result$Description)
+
+  # Store the GSEA results and the enrichment plot results in a list
+  results <- list(
+    gsea_results = gsea_result,
+    gseaplot_results = gseaplot_results
+  )
+
+  # Return the results
+  return(results)
+}
+
+```
+
+# rat_1
+```{r}
+rat_1_DEG_symbols_list <- rat_1_edgeR_topDE_2 %>%
+  purrr::map(pull, rgd_symbol) %>% 
+  purrr::map(discard, is.na) %>%
+  purrr::map(sort) %>%
+  purrr::map(str_to_upper) %>%
+  purrr::set_names(rat_1_comparisons_v)
+
+rat_1_ora_results_GO_BP <- rat_1_DEG_symbols_list %>% ora_analysis(database = GO_Biological_Process_2021)
+rat_1_ora_results_GO_MF <- rat_1_DEG_symbols_list %>% ora_analysis(database = GO_Molecular_Function_2021)
+rat_1_ora_results_GO_CC <- rat_1_DEG_symbols_list %>% ora_analysis(database = GO_Cellular_Component_2021)
+# rat_1_ora_results_Reactome <- rat_1_DEG_symbols_list %>% ora_analysis(database = Reactome_2016)
+# rat_1_ora_results_BioPlanet <- rat_1_DEG_symbols_list %>% ora_analysis(database = BioPlanet_2019)
+rat_1_ora_results_KEGG <- rat_1_DEG_symbols_list %>% ora_analysis(database = KEGG_2019_Mouse)
+rat_1_ora_results_WikiPathways <- rat_1_DEG_symbols_list %>% ora_analysis(database = WikiPathways_2019_Mouse)
+
+rat_1_ora_results_GO_BP %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - GO BP") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+rat_1_ora_results_GO_MF %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - GO MF") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+rat_1_ora_results_GO_CC %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - GO CC") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+rat_1_ora_results_KEGG %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - KEGG") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+rat_1_ora_results_WikiPathways %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - WikiPathways") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+rat_1_ora_results_list <- list(
+  GO_BP = rat_1_ora_results_GO_BP@compareClusterResult,
+  GO_MF = rat_1_ora_results_GO_MF@compareClusterResult,
+  GO_CC = rat_1_ora_results_GO_CC@compareClusterResult,
+  KEGG = rat_1_ora_results_KEGG@compareClusterResult,
+  WikiPathways = rat_1_ora_results_WikiPathways@compareClusterResult
+)
+
+rat_1_ora_results_df <- rat_1_ora_results_list %>% 
+  purrr::map(mutate_at, .vars = c("pvalue", "p.adjust", "qvalue"), .funs = formatC, digits = 2, format = "e") %>% 
+  bind_rows(.id = "Database") %>% 
+  rownames_to_column() %>% 
+  dplyr::select(-rowname)
+
+# rat_1_ora_results_df %>% vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/rat_1_ora_results_df.tsv", delim = "\t")  
+```
+
+# pathview - rat_1
+```{r}
+data(paths.hsa)
+KEGG_pathway_dict_df <- data.frame(pathway = paths.hsa,
+                             kegg_id = names(paths.hsa)) %>% 
+  mutate(kegg_id = kegg_id %>% str_remove(pattern = "hsa")) %>% 
+  rownames_to_column(var = "species_id") 
+
+rat_1_KEGG_pathway_v <- KEGG_pathway_dict_df %>% 
+  pull(as.numeric(kegg_id)) %>%
+  purrr::set_names(KEGG_pathway_dict_df$pathway)
+
+rat_1_KEGG_gene_list <- purrr::map(seq_along(rat_1_edgeR_results), function(i) {
+  rat_1_edgeR_results[[i]] %>% 
+  pull(as.numeric(logFC)) %>%
+  purrr::set_names(rat_1_edgeR_results[[i]]$entrezgene_id)}
+  ) %>%
+  purrr::set_names(names(rat_1_edgeR_results))
+
+setwd(paste0(path_to_data, "KEGG_pathways/"))
+tic()
+purrr::map(seq_along(rat_1_ora_results_KEGG@compareClusterResult$ID), function(p_id) {
+  print(p_id)
+  pathview(gene.data = rat_1_KEGG_gene_list$scr25_x_scr3,
+           species = "rno",
+           pathway.id = rat_1_KEGG_pathway_v[rat_1_ora_results_KEGG@compareClusterResult$ID[p_id]],
+           kegg.dir = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/KEGG_pathways",
+           out.suffix = paste0(str_replace_all(str_replace_all(rat_1_ora_results_KEGG@compareClusterResult$ID[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = ""), "_rat_1_KEGG_scr25_x_scr3"),
+           kegg.native = TRUE, same.layer = TRUE)
+  })
+toc()
+
+# setwdpaste0(path_to_data, "KEGG_pathways/")
+# tic()
+# purrr::map(seq_along(rat_1_ora_results_KEGG@compareClusterResult$ID), function(p_id) {
+#   print(p_id)
+#   pathview(gene.data = rat_1_KEGG_gene_list$si25_x_si3,
+#            species = "rno",
+#            pathway.id = rat_1_KEGG_pathway_v[rat_1_ora_results_KEGG@compareClusterResult$ID[p_id]],
+#            kegg.dir = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/KEGG_pathways",
+#            out.suffix = paste0(str_replace_all(str_replace_all(rat_1_ora_results_KEGG@compareClusterResult$ID[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = ""), "_rat_1_KEGG_si25_x_si3"),
+#            kegg.native = TRUE, same.layer = TRUE)
+#   })
+# toc()
+
+```
+
+# wordcloud plots - rat_1
+```{r}
+plot_wordcloud <- function(ora_results_df){
+  set.seed(123)
+  ora_results_df %>% 
+    dplyr::filter(p.adjust <= 0.05) %>% 
+    # dplyr::filter(Cluster == "Cortex_Motor_Medial") %>% 
+    ggplot(aes(label = ID, x = Cluster, color = Cluster, size = -log10(p.adjust))) +
+    geom_text_wordcloud(shape = "cardioid") +
+    theme_minimal() +
+    ggeasy::easy_all_text_size(size = 20)
+}
+
+rat_1_word_cloud_plot_GO_BP <- rat_1_ora_results_GO_BP@compareClusterResult %>% 
+  plot_wordcloud()
+
+rat_1_word_cloud_plot_GO_MF <- rat_1_ora_results_GO_MF@compareClusterResult %>% 
+  plot_wordcloud()
+
+rat_1_word_cloud_plot_GO_CC <- rat_1_ora_results_GO_CC@compareClusterResult %>% 
+  plot_wordcloud()
+
+rat_1_word_cloud_plot_KEGG <- rat_1_ora_results_KEGG@compareClusterResult %>% 
+  plot_wordcloud()
+
+# rat_1_word_cloud_plot_Reactome <- rat_1_ora_results_Reactome@compareClusterResult %>% 
+  # plot_wordcloud()
+
+# rat_1_word_cloud_plot_BioPlanet <- rat_1_ora_results_BioPlanet@compareClusterResult %>% 
+#   plot_wordcloud()
+```
+
+# GSEA - KEGG - rat_ _1
+```{r}
+rat_1_edgeR_results_2_no_NA <- rat_1_edgeR_results %>% purrr::map(drop_na, entrezgene_id)
+
+rat_1_gene_list <- rat_1_edgeR_results_2_no_NA %>% 
+  purrr::map(arrange, desc(as.numeric(logFC))) %>%
+  purrr::map(distinct, entrezgene_id, .keep_all = TRUE) %>% 
+  purrr::map(mutate, rank = rank(logFC, ties.method = "random")) %>% 
+  purrr::map(arrange, desc(rank)) %>%
+  purrr::map(dplyr::select, c(entrezgene_id, logFC))
+
+rat_1_gene_list <- purrr::map(seq_along(rat_1_gene_list), function(i) rat_1_gene_list[[i]] %>% 
+  pull(as.numeric(logFC)) %>%
+  purrr::set_names(rat_1_gene_list[[i]]$entrezgene_id)) %>%
+  purrr::set_names(names(rat_1_edgeR_results))
+
+rat_1_gse_KEGG_results_list <- purrr::map(seq_along(rat_1_gene_list), function(i) gseKEGG(geneList = rat_1_gene_list[[i]], exponent = 1, organism = "rno", eps = 0)) %>% purrr::set_names(names(rat_1_edgeR_results))
+
+purrr::map(seq_along(rat_1_gse_KEGG_results_list$scr25_x_scr3@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$scr25_x_scr3,
+                      geneSetID = i, 
+                      title = rat_1_gse_KEGG_results_list$scr25_x_scr3@result$Description[i]
+                      ) 
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    aplot::ggsave(filename = paste0(path_to_data, "GSEA_rat_1/GSEA_scr25_x_scr3_",rat_1_gse_KEGG_results_list$scr25_x_scr3@result$Description[i], ".png"), width = 7, height = 5, dpi = 900)
+}) 
+
+purrr::map(seq_along(rat_1_gse_KEGG_results_list$si3_x_scr3@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si3_x_scr3,
+                      geneSetID = i, 
+                      title = rat_1_gse_KEGG_results_list$si3_x_scr3@result$Description[i]
+                      ) 
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    aplot::ggsave(filename = paste0(path_to_data, "GSEA_rat_1/GSEA_si3_x_scr3_",rat_1_gse_KEGG_results_list$si3_x_scr3@result$Description[i], ".png"), width = 7, height = 5, dpi = 900)
+}) 
+
+purrr::map(seq_along(rat_1_gse_KEGG_results_list$si25_x_scr25@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si25_x_scr25,
+                      geneSetID = i, 
+                      title = rat_1_gse_KEGG_results_list$si25_x_scr25@result$Description[i]
+                      ) 
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    aplot::ggsave(filename = paste0(path_to_data, "GSEA_rat_1/GSEA_si25_x_scr25_",rat_1_gse_KEGG_results_list$si25_x_scr25@result$Description[i], ".png"), width = 7, height = 5, dpi = 900)
+}) 
+
+
+purrr::map(seq_along(rat_1_gse_KEGG_results_list$si25_x_si3@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si25_x_si3,
+                      geneSetID = i, 
+                      title = rat_1_gse_KEGG_results_list$si25_x_si3@result$Description[i]
+                      ) 
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    aplot::ggsave(filename = paste0(path_to_data, "GSEA_rat_1/GSEA_si25_x_si3_",rat_1_gse_KEGG_results_list$si25_x_si3@result$Description[i], ".png"), width = 7, height = 5, dpi = 900)
+}) 
+
+# enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$scr25_x_scr3,
+#                       geneSetID = 1, 
+#                       title = rat_1_gse_KEGG_results_list$scr25_x_scr3@result$Description[1]
+#                       )
+# 
+# cowplot::plot_grid(
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$scr25_x_scr3,
+#                       geneSetID = 1, 
+#                       title = rat_1_gse_KEGG_results_list$scr25_x_scr3@result$Description[1]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$scr25_x_scr3,
+#                       geneSetID = 2, 
+#                       title = rat_1_gse_KEGG_results_list$scr25_x_scr3@result$Description[2]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$scr25_x_scr3,
+#                       geneSetID = 3, 
+#                       title = rat_1_gse_KEGG_results_list$scr25_x_scr3@result$Description[3]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$scr25_x_scr3,
+#                       geneSetID = 4, 
+#                       title = rat_1_gse_KEGG_results_list$scr25_x_scr3@result$Description[4]
+#                       )
+#   )
+# 
+# cowplot::plot_grid(
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si25_x_si3,
+#                       geneSetID = 1, 
+#                       title = rat_1_gse_KEGG_results_list$si25_x_si3@result$Description[1]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si25_x_si3,
+#                       geneSetID = 2, 
+#                       title = rat_1_gse_KEGG_results_list$si25_x_si3@result$Description[2]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si25_x_si3,
+#                       geneSetID = 3, 
+#                       title = rat_1_gse_KEGG_results_list$si25_x_si3@result$Description[3]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si25_x_si3,
+#                       geneSetID = 4, 
+#                       title = rat_1_gse_KEGG_results_list$si25_x_si3@result$Description[4]
+#                       )
+#   )
+# 
+# cowplot::plot_grid(
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si3_x_scr3,
+#                       geneSetID = 1, 
+#                       title = rat_1_gse_KEGG_results_list$si3_x_scr3@result$Description[1]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si3_x_scr3,
+#                       geneSetID = 2, 
+#                       title = rat_1_gse_KEGG_results_list$si3_x_scr3@result$Description[2]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si3_x_scr3,
+#                       geneSetID = 3, 
+#                       title = rat_1_gse_KEGG_results_list$si3_x_scr3@result$Description[3]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si3_x_scr3,
+#                       geneSetID = 4, 
+#                       title = rat_1_gse_KEGG_results_list$si3_x_scr3@result$Description[4]
+#                       )
+#   )
+# 
+# cowplot::plot_grid(
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si25_x_scr25,
+#                       geneSetID = 1, 
+#                       title = rat_1_gse_KEGG_results_list$si25_x_scr25@result$Description[1]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si25_x_scr25,
+#                       geneSetID = 2, 
+#                       title = rat_1_gse_KEGG_results_list$si25_x_scr25@result$Description[2]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_1_gse_KEGG_results_list$si25_x_scr25,
+#                       geneSetID = 3, 
+#                       title = rat_1_gse_KEGG_results_list$si25_x_scr25@result$Description[3]
+#                       )
+#   )
+```
+
+
+
+
+
+
+
+# rat_2
+```{r}
+rat_2_DEG_symbols_list <- rat_2_edgeR_topDE_2 %>%
+  purrr::map(pull, rgd_symbol) %>% 
+  purrr::map(discard, is.na) %>%
+  purrr::map(sort) %>%
+  purrr::map(str_to_upper) %>%
+  purrr::set_names(rat_2_comparisons_v)
+
+rat_2_ora_results_GO_BP <- rat_2_DEG_symbols_list %>% ora_analysis(database = GO_Biological_Process_2021)
+rat_2_ora_results_GO_MF <- rat_2_DEG_symbols_list %>% ora_analysis(database = GO_Molecular_Function_2021)
+rat_2_ora_results_GO_CC <- rat_2_DEG_symbols_list %>% ora_analysis(database = GO_Cellular_Component_2021)
+# rat_2_ora_results_Reactome <- rat_2_DEG_symbols_list %>% ora_analysis(database = Reactome_2016)
+# rat_2_ora_results_BioPlanet <- rat_2_DEG_symbols_list %>% ora_analysis(database = BioPlanet_2019)
+rat_2_ora_results_KEGG <- rat_2_DEG_symbols_list %>% ora_analysis(database = KEGG_2019_Mouse)
+rat_2_ora_results_WikiPathways <- rat_2_DEG_symbols_list %>% ora_analysis(database = WikiPathways_2019_Mouse)
+
+rat_2_ora_results_GO_BP %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - GO BP") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+rat_2_ora_results_GO_MF %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - GO MF") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+rat_2_ora_results_GO_CC %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - GO CC") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+rat_2_ora_results_KEGG %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - KEGG") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+rat_2_ora_results_WikiPathways %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - WikiPathways") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+rat_2_ora_results_list <- list(
+  GO_BP = rat_2_ora_results_GO_BP@compareClusterResult,
+  GO_MF = rat_2_ora_results_GO_MF@compareClusterResult,
+  GO_CC = rat_2_ora_results_GO_CC@compareClusterResult,
+  KEGG = rat_2_ora_results_KEGG@compareClusterResult,
+  WikiPathways = rat_2_ora_results_WikiPathways@compareClusterResult
+)
+
+rat_2_ora_results_df <- rat_2_ora_results_list %>% 
+  purrr::map(mutate_at, .vars = c("pvalue", "p.adjust", "qvalue"), .funs = formatC, digits = 2, format = "e") %>% 
+  bind_rows(.id = "Database") %>% 
+  rownames_to_column() %>% 
+  dplyr::select(-rowname)
+
+# rat_2_ora_results_df %>% vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/rat_2_ora_results_df.tsv", delim = "\t")  
+```
+
+# pathview - rat_2
+```{r}
+data(paths.hsa)
+KEGG_pathway_dict_df <- data.frame(pathway = paths.hsa,
+                             kegg_id = names(paths.hsa)) %>% 
+  mutate(kegg_id = kegg_id %>% str_remove(pattern = "hsa")) %>% 
+  rownames_to_column(var = "species_id") 
+
+rat_2_KEGG_pathway_v <- KEGG_pathway_dict_df %>% 
+  pull(as.numeric(kegg_id)) %>%
+  purrr::set_names(KEGG_pathway_dict_df$pathway)
+
+rat_2_KEGG_gene_list <- purrr::map(seq_along(rat_2_edgeR_results), function(i) {
+  rat_2_edgeR_results[[i]] %>% 
+  pull(as.numeric(logFC)) %>%
+  purrr::set_names(rat_2_edgeR_results[[i]]$entrezgene_id)}
+  ) %>%
+  purrr::set_names(names(rat_2_edgeR_results))
+
+# setwdpaste0(path_to_data, "KEGG_pathways/")
+# tic()
+# purrr::map(seq_along(rat_2_ora_results_KEGG@compareClusterResult$ID), function(p_id) {
+#   print(p_id)
+#   pathview(gene.data = rat_2_KEGG_gene_list$Ct25_x_Ct3,
+#            species = "rno",
+#            pathway.id = rat_2_KEGG_pathway_v[rat_2_ora_results_KEGG@compareClusterResult$ID[p_id]],
+#            kegg.dir = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/KEGG_pathways",
+#            out.suffix = paste0(str_replace_all(str_replace_all(rat_2_ora_results_KEGG@compareClusterResult$ID[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = ""), "_rat_2_KEGG_Ct25_x_Ct3"),
+#            kegg.native = TRUE, same.layer = TRUE)
+#   })
+# toc()
+```
+
+# wordcloud plots - rat_2
+```{r}
+plot_wordcloud <- function(ora_results_df){
+  set.seed(123)
+  ora_results_df %>% 
+    dplyr::filter(p.adjust <= 0.05) %>% 
+    # dplyr::filter(Cluster == "Cortex_Motor_Medial") %>% 
+    ggplot(aes(label = ID, x = Cluster, color = Cluster, size = -log10(p.adjust))) +
+    geom_text_wordcloud(shape = "cardioid") +
+    theme_minimal() +
+    ggeasy::easy_all_text_size(size = 20)
+}
+
+rat_2_word_cloud_plot_GO_BP <- rat_2_ora_results_GO_BP@compareClusterResult %>% 
+  plot_wordcloud()
+
+rat_2_word_cloud_plot_GO_MF <- rat_2_ora_results_GO_MF@compareClusterResult %>% 
+  plot_wordcloud()
+
+rat_2_word_cloud_plot_GO_CC <- rat_2_ora_results_GO_CC@compareClusterResult %>% 
+  plot_wordcloud()
+
+rat_2_word_cloud_plot_KEGG <- rat_2_ora_results_KEGG@compareClusterResult %>% 
+  plot_wordcloud()
+
+# rat_2_word_cloud_plot_Reactome <- rat_2_ora_results_Reactome@compareClusterResult %>% 
+#   plot_wordcloud()
+# 
+# rat_2_word_cloud_plot_BioPlanet <- rat_2_ora_results_BioPlanet@compareClusterResult %>% 
+#   plot_wordcloud()
+```
+
+# GSEA - KEGG - rat_2
+```{r}
+rat_2_edgeR_results_2_no_NA <- rat_2_edgeR_results %>% purrr::map(drop_na, entrezgene_id)
+
+rat_2_gene_list <- rat_2_edgeR_results_2_no_NA %>% 
+  purrr::map(arrange, desc(as.numeric(logFC))) %>%
+  purrr::map(distinct, entrezgene_id, .keep_all = TRUE) %>% 
+  purrr::map(mutate, rank = rank(logFC, ties.method = "random")) %>% 
+  purrr::map(arrange, desc(rank)) %>%
+  purrr::map(dplyr::select, c(entrezgene_id, logFC))
+
+rat_2_gene_list <- purrr::map(seq_along(rat_2_gene_list), function(i) rat_2_gene_list[[i]] %>% 
+  pull(as.numeric(logFC)) %>%
+  purrr::set_names(rat_2_gene_list[[i]]$entrezgene_id)) %>%
+  purrr::set_names(names(rat_2_edgeR_results))
+
+rat_2_gse_KEGG_results_list <- purrr::map(seq_along(rat_2_gene_list), function(i) gseKEGG(geneList = rat_2_gene_list[[i]], exponent = 1, organism = "rno", eps = 0)) %>% purrr::set_names(names(rat_2_edgeR_results))
+
+
+purrr::map(seq_along(rat_2_gse_KEGG_results_list$Ct25_x_Ct3@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$Ct25_x_Ct3,
+                      geneSetID = i, 
+                      title = rat_2_gse_KEGG_results_list$Ct25_x_Ct3@result$Description[i]
+                      ) 
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    ggsave(filename = paste0(path_to_data, "GSEA_rat_2/GSEA_Ct25_x_Ct3_",rat_2_gse_KEGG_results_list$Ct25_x_Ct3@result$Description[i], ".png"), width = 7, height = 5, dpi = 900)
+}) 
+
+purrr::map(seq_along(rat_2_gse_KEGG_results_list$G3_x_Ct3@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$G3_x_Ct3,
+                      geneSetID = i, 
+                      title = rat_2_gse_KEGG_results_list$G3_x_Ct3@result$Description[i]
+                      ) 
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    ggsave(filename = paste0(path_to_data, "GSEA_rat_2/GSEA_G3_x_Ct3_",rat_2_gse_KEGG_results_list$G3_x_Ct3@result$Description[i], ".png"), width = 7, height = 5, dpi = 900)
+}) 
+
+purrr::map(seq_along(rat_2_gse_KEGG_results_list$M3_x_Ct3@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$M3_x_Ct3,
+                      geneSetID = i, 
+                      title = rat_2_gse_KEGG_results_list$M3_x_Ct3@result$Description[i]
+                      ) 
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    ggsave(filename = paste0(path_to_data, "GSEA_rat_2/GSEA_M3_x_Ct3_",rat_2_gse_KEGG_results_list$M3_x_Ct3@result$Description[i], ".png"), width = 7, height = 5, dpi = 900)
+}) 
+# 
+# enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$Ct25_x_Ct3,
+#                       geneSetID = 1, 
+#                       title = rat_2_gse_KEGG_results_list$Ct25_x_Ct3@result$Description[1]
+#                       )
+# 
+# cowplot::plot_grid(
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$Ct25_x_Ct3,
+#                       geneSetID = 1, 
+#                       title = rat_2_gse_KEGG_results_list$Ct25_x_Ct3@result$Description[1]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$Ct25_x_Ct3,
+#                       geneSetID = 2, 
+#                       title = rat_2_gse_KEGG_results_list$Ct25_x_Ct3@result$Description[2]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$Ct25_x_Ct3,
+#                       geneSetID = 3, 
+#                       title = rat_2_gse_KEGG_results_list$Ct25_x_Ct3@result$Description[3]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$Ct25_x_Ct3,
+#                       geneSetID = 4, 
+#                       title = rat_2_gse_KEGG_results_list$Ct25_x_Ct3@result$Description[4]
+#                       )
+#   )
+# 
+# cowplot::plot_grid(
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$G3_x_Ct3,
+#                       geneSetID = 1, 
+#                       title = rat_2_gse_KEGG_results_list$G3_x_Ct3@result$Description[1]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$G3_x_Ct3,
+#                       geneSetID = 2, 
+#                       title = rat_2_gse_KEGG_results_list$G3_x_Ct3@result$Description[2]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$G3_x_Ct3,
+#                       geneSetID = 3, 
+#                       title = rat_2_gse_KEGG_results_list$G3_x_Ct3@result$Description[3]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$G3_x_Ct3,
+#                       geneSetID = 4, 
+#                       title = rat_2_gse_KEGG_results_list$G3_x_Ct3@result$Description[4]
+#                       )
+#   )
+# 
+# cowplot::plot_grid(
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$M3_x_Ct3,
+#                       geneSetID = 1, 
+#                       title = rat_2_gse_KEGG_results_list$M3_x_Ct3@result$Description[1]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$M3_x_Ct3,
+#                       geneSetID = 2, 
+#                       title = rat_2_gse_KEGG_results_list$M3_x_Ct3@result$Description[2]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$M3_x_Ct3,
+#                       geneSetID = 3, 
+#                       title = rat_2_gse_KEGG_results_list$M3_x_Ct3@result$Description[3]
+#                       ),
+#   enrichplot::gseaplot2(x = rat_2_gse_KEGG_results_list$M3_x_Ct3,
+#                       geneSetID = 4, 
+#                       title = rat_2_gse_KEGG_results_list$M3_x_Ct3@result$Description[4]
+#                       )
+#   )
+```
+
+
+# Mouse
+# Glucose metabolism-glycolysis, mitochondria OXPHOS, lipogenesis and lipolysis (ACC, ACSL, ATGL, CIC, HSL, DGAT etc.), lipid droplets (PLIN)
+# Intracellular redox status-glutathione pathway (GPX, GSR, GGT,GGCT etc.), thioredoxins (TrxR, Trxs), peroxiredoxins (Prxs), SODs, catalase
+# Insulin synthetic and secretion machinery involving ER, Golgi and  formation of insulin granules (Vamp, Sytl, Vgf, RyR, Sur, Kir, Kcnj, Abcc8, PC, CPE, ZnT8, RAP, CHGA/B, SCH, PCSk,SCG, PTPRN etc.)  and their secretion (SNARE, CAPS, Munc, VGLUT, VGAT, VNUT, VMAT,Rab, Syt etc.)
+```{r}
+mouse_DEG_symbols_list <- mouse_edgeR_topDE_2 %>%
+  purrr::map(pull, mgi_symbol) %>% 
+  purrr::map(discard, is.na) %>%
+  purrr::map(sort) %>%
+  purrr::map(str_to_upper) %>%
+  purrr::set_names(mouse_comparisons_v)
+
+mouse_ora_results_GO_BP <- mouse_DEG_symbols_list %>% ora_analysis(database = GO_Biological_Process_2021)
+mouse_ora_results_GO_MF <- mouse_DEG_symbols_list %>% ora_analysis(database = GO_Molecular_Function_2021)
+mouse_ora_results_GO_CC <- mouse_DEG_symbols_list %>% ora_analysis(database = GO_Cellular_Component_2021)
+# mouse_ora_results_Reactome <- mouse_DEG_symbols_list %>% ora_analysis(database = Reactome_2016)
+# mouse_ora_results_BioPlanet <- mouse_DEG_symbols_list %>% ora_analysis(database = BioPlanet_2019)
+mouse_ora_results_KEGG <- mouse_DEG_symbols_list %>% ora_analysis(database = KEGG_2019_Mouse)
+mouse_ora_results_WikiPathways <- mouse_DEG_symbols_list %>% ora_analysis(database = WikiPathways_2019_Mouse)
+
+mouse_ora_results_GO_BP %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - GO BP") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+mouse_ora_results_GO_MF %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - GO MF") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+mouse_ora_results_GO_CC %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - GO CC") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+mouse_ora_results_KEGG %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - KEGG") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+mouse_ora_results_WikiPathways %>% 
+  clusterProfiler::dotplot(font.size = 8, includeAll = FALSE, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "ORA - WikiPathways") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20))
+
+mouse_ora_results_list <- list(
+  GO_BP = mouse_ora_results_GO_BP@compareClusterResult,
+  GO_MF = mouse_ora_results_GO_MF@compareClusterResult,
+  GO_CC = mouse_ora_results_GO_CC@compareClusterResult,
+  KEGG = mouse_ora_results_KEGG@compareClusterResult,
+  WikiPathways = mouse_ora_results_WikiPathways@compareClusterResult
+)
+
+mouse_ora_results_df <- mouse_ora_results_list %>% 
+  purrr::map(mutate_at, .vars = c("pvalue", "p.adjust", "qvalue"), .funs = formatC, digits = 2, format = "e") %>% 
+  bind_rows(.id = "Database") %>% 
+  rownames_to_column() %>% 
+  dplyr::select(-rowname)
+
+# mouse_ora_results_df %>% vroom::vroom_write(file = paste0(path_to_data, "mouse_ora_results_df.tsv"), delim = "\t")
+```
+
+# wordcloud plots - mouse
+```{r}
+plot_wordcloud <- function(ora_results_df){
+  set.seed(123)
+  ora_results_df %>% 
+    dplyr::filter(p.adjust <= 0.05) %>% 
+    # dplyr::filter(Cluster == "Cortex_Motor_Medial") %>% 
+    ggplot(aes(label = ID, x = Cluster, color = Cluster, size = -log10(p.adjust))) +
+    geom_text_wordcloud(shape = "cardioid") +
+    theme_minimal() +
+    ggeasy::easy_all_text_size(size = 20)
+}
+
+mouse_word_cloud_plot_GO_BP <- mouse_ora_results_GO_BP@compareClusterResult %>% 
+  plot_wordcloud()
+
+mouse_word_cloud_plot_GO_MF <- mouse_ora_results_GO_MF@compareClusterResult %>% 
+  plot_wordcloud()
+
+mouse_word_cloud_plot_GO_CC <- mouse_ora_results_GO_CC@compareClusterResult %>% 
+  plot_wordcloud()
+
+mouse_word_cloud_plot_KEGG <- mouse_ora_results_KEGG@compareClusterResult %>% 
+  plot_wordcloud()
+# 
+# mouse_word_cloud_plot_Reactome <- mouse_ora_results_Reactome@compareClusterResult %>%
+#   plot_wordcloud()
+# 
+# mouse_word_cloud_plot_BioPlanet <- mouse_ora_results_BioPlanet@compareClusterResult %>% 
+#   plot_wordcloud()
+```
+
+# GSEA - KEGG - mouse
+```{r}
+# gmt_df <- KEGG_2019_Mouse %>% clusterProfiler::read.gmt()
+
+mouse_gene_list <- mouse_edgeR_results %>% 
+  purrr::map(function(x) x %>% 
+               arrange(desc(as.numeric(logFC))) %>% 
+               # distinct(entrezgene_id, .keep_all = TRUE) %>%
+               distinct(mgi_symbol, .keep_all = TRUE) %>% 
+               mutate(rank = rank(logFC, ties.method = "random"), 
+                      mgi_symbol = mgi_symbol %>% str_to_upper) %>% 
+               arrange(desc(rank)) %>%
+               dplyr::select(mgi_symbol, logFC)
+  )
+
+mouse_ranked_gene_list <- purrr::map(seq_along(mouse_gene_list), function(i) mouse_gene_list[[i]] %>% 
+  pull(as.numeric(logFC)) %>%
+  purrr::set_names(mouse_gene_list[[i]]$mgi_symbol)) %>%
+  purrr::set_names(names(mouse_edgeR_results))
+
+gsea_KEGG_mouse_results_list <- purrr::map(seq_along(mouse_ranked_gene_list), function(i) gsea_analysis(database = KEGG_2019_Mouse, sorted_genes = mouse_ranked_gene_list[[i]], p_value_cutoff = 0.05, p_adjust_cutoff = 0.05, min_size = 10, max_size = 500, p_adjust_method = "BH")) %>% purrr::set_names(names(mouse_edgeR_results))
+
+gsea_KEGG_mouse_results_list$W_x_M$gsea_results@result %>% vroom::vroom_write(file = paste0(path_to_data, "gsea_KEGG_mouse_result_W_x_M.tsv"), delim = "\t")
+gsea_KEGG_mouse_results_list$Wplus_x_Mplus$gsea_results@result %>% vroom::vroom_write(file = paste0(path_to_data, "gsea_KEGG_mouse_result_Wplus_x_Mplus.tsv"), delim = "\t")
+gsea_KEGG_mouse_results_list$Mplus_x_M$gsea_results@result %>% vroom::vroom_write(file = paste0(path_to_data, "gsea_KEGG_mouse_result_Mplus_x_M.tsv"), delim = "\t")
+gsea_KEGG_mouse_results_list$Wplus_x_W$gsea_results@result %>% vroom::vroom_write(file = paste0(path_to_data, "gsea_KEGG_mouse_result_Wplus_x_W.tsv"), delim = "\t")
+
+
+purrr::map(seq_along(gsea_KEGG_mouse_results_list$W_x_M$gsea_results@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = gsea_KEGG_mouse_results_list$W_x_M$gsea_results,
+                      geneSetID = i,
+                      title = gsea_KEGG_mouse_results_list$W_x_M$gsea_results@result$Description[i]
+                      ) 
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    aplot::ggsave(filename = paste0(path_to_data, "GSEA_mouse/GSEA_W_x_M_", str_replace_all(string = gsea_KEGG_mouse_results_list$W_x_M$gsea_results@result$Description[i], pattern = " / ", replacement = "_"), ".png"), width = 7, height = 5, dpi = 900)
+})
+
+purrr::map(seq_along(gsea_KEGG_mouse_results_list$Wplus_x_Mplus$gsea_results@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = gsea_KEGG_mouse_results_list$Wplus_x_Mplus$gsea_results,
+                      geneSetID = i,
+                      title = gsea_KEGG_mouse_results_list$Wplus_x_Mplus$gsea_results@result$Description[i]
+                      )
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    aplot::ggsave(filename = paste0(path_to_data, "GSEA_mouse/GSEA_Wplus_x_Mplus_", str_replace_all(string = gsea_KEGG_mouse_results_list$Wplus_x_Mplus$gsea_results@result$Description[i], pattern = " / ", replacement = "_"), ".png"), width = 7, height = 5, dpi = 900)
+})
+
+purrr::map(seq_along(gsea_KEGG_mouse_results_list$Mplus_x_M$gsea_results@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = gsea_KEGG_mouse_results_list$Mplus_x_M$gsea_results,
+                      geneSetID = i,
+                      title = gsea_KEGG_mouse_results_list$Mplus_x_M$gsea_results@result$Description[i]
+                      )
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    aplot::ggsave(filename = paste0(path_to_data, "GSEA_mouse/GSEA_Mplus_x_M_", str_replace_all(string = gsea_KEGG_mouse_results_list$Mplus_x_M$gsea_results@result$Description[i], pattern = " / ", replacement = "_"), ".png"), width = 7, height = 5, dpi = 900)
+})
+
+purrr::map(seq_along(gsea_KEGG_mouse_results_list$Wplus_x_W$gsea_results@result$Description), function(i) {
+  print(i)
+  gsea_plot <- enrichplot::gseaplot2(x = gsea_KEGG_mouse_results_list$Wplus_x_W$gsea_results,
+                      geneSetID = i,
+                      title = gsea_KEGG_mouse_results_list$Wplus_x_W$gsea_results@result$Description[i]
+                      )
+  aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>% 
+    aplot::ggsave(filename = paste0(path_to_data, "GSEA_mouse/GSEA_Wplus_x_W_", str_replace_all(string = gsea_KEGG_mouse_results_list$Wplus_x_W$gsea_results@result$Description[i], pattern = " / ", replacement = "_"), ".png"), width = 7, height = 5, dpi = 900)
+})
+
+
+```
+
+# pathview - mouse
+```{r}
+data(paths.hsa)
+KEGG_pathway_dict_df <- data.frame(pathway = paths.hsa,
+                             kegg_id = names(paths.hsa)) %>% 
+  mutate(kegg_id = kegg_id %>% str_remove(pattern = "hsa")) %>% 
+  rownames_to_column(var = "species_id") 
+
+mouse_KEGG_pathway_v <- KEGG_pathway_dict_df %>% 
+  pull(as.numeric(kegg_id)) %>%
+  purrr::set_names(KEGG_pathway_dict_df$pathway)
+
+mouse_KEGG_gene_list <- purrr::map(seq_along(mouse_edgeR_results), function(i) {
+  mouse_edgeR_results[[i]] %>% 
+  pull(as.numeric(logFC)) %>%
+  purrr::set_names(mouse_edgeR_results[[i]]$entrezgene_id)}
+  ) %>%
+  purrr::set_names(names(mouse_edgeR_results))
+
+setwd(paste0(path_to_data, "KEGG_pathways/"))
+purrr::map(seq_along(gsea_KEGG_mouse_results_list$W_x_M$gsea_results@result$ID), function(p_id) {
+  print(p_id)
+  pathview(gene.data = mouse_KEGG_gene_list$W_x_M,
+           species = "mmu",
+           pathway.id = mouse_KEGG_pathway_v[gsea_KEGG_mouse_results_list$W_x_M$gsea_results@result$ID[p_id]],
+           kegg.dir = paste0(path_to_data, "KEGG_pathways/"),
+           out.suffix = paste0(str_replace_all(str_replace_all(gsea_KEGG_mouse_results_list$W_x_M$gsea_results@result$ID[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = "_"), "_mouse_KEGG_W_x_M"),
+           kegg.native = TRUE, same.layer = TRUE)
+  })
+
+setwd(paste0(path_to_data, "KEGG_pathways/"))
+# purrr::map(seq_along(gsea_KEGG_mouse_results_list$Mplus_x_M$gsea_results@result$ID), function(p_id) {
+purrr::map(17:length(gsea_KEGG_mouse_results_list$Mplus_x_M$gsea_results@result$ID), function(p_id) {  
+  print(p_id)
+  pathview(gene.data = mouse_KEGG_gene_list$Mplus_x_M,
+           species = "mmu",
+           pathway.id = mouse_KEGG_pathway_v[gsea_KEGG_mouse_results_list$Mplus_x_M$gsea_results@result$ID[p_id]],
+           kegg.dir = paste0(path_to_data, "KEGG_pathways/"),
+           out.suffix = paste0(str_replace_all(str_replace_all(gsea_KEGG_mouse_results_list$Mplus_x_M$gsea_results@result$ID[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = ""), "_mouse_KEGG_Mplus_x_M"),
+           kegg.native = TRUE, same.layer = TRUE)
+  })
+
+setwd(paste0(path_to_data, "KEGG_pathways/"))
+purrr::map(seq_along(gsea_KEGG_mouse_results_list$Wplus_x_Mplus$gsea_results@result$ID), function(p_id) {
+  print(p_id)
+  pathview(gene.data = mouse_KEGG_gene_list$Wplus_x_Mplus,
+           species = "mmu",
+           pathway.id = mouse_KEGG_pathway_v[gsea_KEGG_mouse_results_list$Wplus_x_Mplus$gsea_results@result$ID[p_id]],
+           kegg.dir = paste0(path_to_data, "KEGG_pathways/"),
+           out.suffix = paste0(str_replace_all(str_replace_all(gsea_KEGG_mouse_results_list$Wplus_x_Mplus$gsea_results@result$ID[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = ""), "_mouse_KEGG_Wplus_x_Mplus"),
+           kegg.native = TRUE, same.layer = TRUE)
+  })
+
+setwd(paste0(path_to_data, "KEGG_pathways/"))
+# purrr::map(seq_along(gsea_KEGG_mouse_results_list$Wplus_x_W$gsea_results@result$ID), function(p_id) {
+purrr::map(9:length(gsea_KEGG_mouse_results_list$Wplus_x_W$gsea_results@result$ID), function(p_id) {  
+  print(p_id)
+  pathview(gene.data = mouse_KEGG_gene_list$Wplus_x_W,
+           species = "mmu",
+           pathway.id = mouse_KEGG_pathway_v[gsea_KEGG_mouse_results_list$Wplus_x_W$gsea_results@result$ID[p_id]],
+           kegg.dir = paste0(path_to_data, "KEGG_pathways/"),
+           out.suffix = paste0(str_replace_all(str_replace_all(gsea_KEGG_mouse_results_list$Wplus_x_W$gsea_results@result$ID[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = ""), "_mouse_KEGG_Wplus_x_W"),
+           kegg.native = TRUE, same.layer = TRUE)
+  })
+
+
+
+
+
+
+
+```
+
+# Include KEGG pathways of interest
+```{r}
+interest_pathways <- c("Oxidative phosphorylation", "Citrate cycle (TCA cycle)")
+
+setwd(paste0(path_to_data, "KEGG_pathways/"))
+purrr::map(seq_along(interest_pathways), function(p_id) {
+  print(p_id)
+  pathview(gene.data = mouse_KEGG_gene_list$W_x_M,
+           species = "mmu",
+           pathway.id = mouse_KEGG_pathway_v[interest_pathways[p_id]],
+           kegg.dir = paste0(path_to_data, "KEGG_pathways/"),
+           out.suffix = paste0(str_replace_all(str_replace_all(interest_pathways[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = "_"), "_mouse_KEGG_W_x_M"),
+           kegg.native = TRUE, same.layer = TRUE)
+  })
+
+setwd(paste0(path_to_data, "KEGG_pathways/"))
+purrr::map(seq_along(interest_pathways), function(p_id) {
+  print(p_id)
+  pathview(gene.data = mouse_KEGG_gene_list$Mplus_x_M,
+           species = "mmu",
+           pathway.id = mouse_KEGG_pathway_v[interest_pathways[p_id]],
+           kegg.dir = paste0(path_to_data, "KEGG_pathways/"),
+           out.suffix = paste0(str_replace_all(str_replace_all(interest_pathways[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = ""), "_mouse_KEGG_Mplus_x_M"),
+           kegg.native = TRUE, same.layer = TRUE)
+  })
+
+setwd(paste0(path_to_data, "KEGG_pathways/"))
+purrr::map(seq_along(interest_pathways), function(p_id) {
+  print(p_id)
+  pathview(gene.data = mouse_KEGG_gene_list$Wplus_x_Mplus,
+           species = "mmu",
+           pathway.id = mouse_KEGG_pathway_v[interest_pathways[p_id]],
+           kegg.dir = paste0(path_to_data, "KEGG_pathways/"),
+           out.suffix = paste0(str_replace_all(str_replace_all(interest_pathways[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = ""), "_mouse_KEGG_Wplus_x_Mplus"),
+           kegg.native = TRUE, same.layer = TRUE)
+  })
+
+setwd(paste0(path_to_data, "KEGG_pathways/"))
+purrr::map(seq_along(interest_pathways), function(p_id) {
+  print(p_id)
+  pathview(gene.data = mouse_KEGG_gene_list$Wplus_x_W,
+           species = "mmu",
+           pathway.id = mouse_KEGG_pathway_v[interest_pathways[p_id]],
+           kegg.dir = paste0(path_to_data, "KEGG_pathways/"),
+           out.suffix = paste0(str_replace_all(str_replace_all(interest_pathways[p_id], pattern = " ", replacement = "_"), pattern = "\\/", replacement = ""), "_mouse_KEGG_Wplus_x_W"),
+           kegg.native = TRUE, same.layer = TRUE)
+  })
+```
+
+
+
+
+
+<!-- # GSEA - rat_1 -->
+<!-- ```{r} -->
+<!-- rat_1_edgeR_results_no_NA <- rat_1_edgeR_results %>% purrr::map(drop_na, rgd_symbol) -->
+
+<!-- rat_1_order_ranked_list <- rat_1_edgeR_results_no_NA %>%  -->
+<!--   purrr::map(arrange, desc(as.numeric(pi_value))) %>% -->
+<!--   purrr::map(distinct, rgd_symbol, .keep_all = TRUE) %>% -->
+<!--   purrr::map(mutate, rank = rank(pi_value, ties.method = "random")) %>%  -->
+<!--   purrr::map(arrange, desc(rank)) %>% -->
+<!--   purrr::map(dplyr::select, c(rgd_symbol, rank)) %>%  -->
+<!--   purrr::map(mutate, rgd_symbol = rgd_symbol %>% str_to_upper()) -->
+
+<!-- rat_1_order_ranked_list <- purrr::map(seq_along(rat_1_order_ranked_list), function(i) { -->
+<!--   rat_1_order_ranked_list[[i]] %>%  -->
+<!--   pull(as.numeric(rank)) %>% -->
+<!--   purrr::set_names(rat_1_order_ranked_list[[i]]$rgd_symbol)} -->
+<!--   ) %>% -->
+<!--   purrr::set_names(names(rat_1_edgeR_results)) -->
+
+<!-- tic() -->
+<!-- gsea_results_rat_1_KEGG_scr25_x_scr3 <- gsea_analysis(sorted_genes = rat_1_order_ranked_list$scr25_x_scr3, database = KEGG_2019_Mouse) -->
+<!-- toc() -->
+
+<!-- gsea_results_rat_1_KEGG_scr25_x_scr3$gsea_results %>%  -->
+<!--   mutate_at(.vars = c("pval", "padj"), .funs = . %>% formatC(digits = 2, format = "e")) %>%  -->
+<!--   mutate_at(.vars = c("log2err", "ES", "NES"), .funs = . %>% formatC(digits = 2, format = "f")) %>%  -->
+<!--   vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/gsea_results_rat_1_KEGG_scr25_x_scr3.tsv", delim = "\t") -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$`Basal cell carcinoma`, -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$`Cell cycle`, -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$Lysosome, -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$`Neuroactive ligand-receptor interaction` -->
+<!--   ) -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$`Cell adhesion molecules (CAMs)`, -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$Malaria, -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$`Other glycan degradation`, -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$`Wnt signaling pathway` -->
+<!--   ) -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$`Cytokine-cytokine receptor interaction`, -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$`Drug metabolism`, -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$`ECM-receptor interaction`, -->
+<!--   gsea_results_rat_1_KEGG_scr25_x_scr3$gseaplot_results$`Protein digestion and absorption` -->
+<!--   ) -->
+
+<!-- tic() -->
+<!-- gsea_results_rat_1_KEGG_si25_x_si3 <- gsea_analysis(sorted_genes = rat_1_order_ranked_list$si25_x_si3, database = KEGG_2019_Mouse) -->
+<!-- toc() -->
+
+<!-- gsea_results_rat_1_KEGG_si25_x_si3$gsea_results %>%  -->
+<!--   mutate_at(.vars = c("pval", "padj"), .funs = . %>% formatC(digits = 2, format = "e")) %>%  -->
+<!--   mutate_at(.vars = c("log2err", "ES", "NES"), .funs = . %>% formatC(digits = 2, format = "f")) %>%  -->
+<!--   vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/gsea_results_rat_1_KEGG_si25_x_si3.tsv", delim = "\t") -->
+
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Neuroactive ligand-receptor interaction`, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Steroid hormone biosynthesis`, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Other glycan degradation`, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Insulin secretion` -->
+<!--   ) -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Metabolism of xenobiotics by cytochrome P450`, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$Proteasome, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Retinol metabolism`, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Tryptophan metabolism` -->
+<!--   ) -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$Ribosome, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Basal cell carcinoma`, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Progesterone-mediated oocyte maturation`, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Rap1 signaling pathway` -->
+<!--   ) -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$Lysosome, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$Asthma, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`MAPK signaling pathway`, -->
+<!--   gsea_results_rat_1_KEGG_si25_x_si3$gseaplot_results$`Maturity onset diabetes of the young` -->
+<!--   ) -->
+
+<!-- tic() -->
+<!-- gsea_results_rat_1_GO_BP_scr25_x_scr3 <- gsea_analysis(sorted_genes = rat_1_order_ranked_list$scr25_x_scr3, database = GO_Biological_Process_2021) -->
+<!-- toc() -->
+
+<!-- gsea_results_rat_1_GO_BP_scr25_x_scr3$gsea_results %>%  -->
+<!--   mutate_at(.vars = c("pval", "padj"), .funs = . %>% formatC(digits = 2, format = "e")) %>%  -->
+<!--   mutate_at(.vars = c("log2err", "ES", "NES"), .funs = . %>% formatC(digits = 2, format = "f")) %>%  -->
+<!--   vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/gsea_results_rat_1_GO_BP_scr25_x_scr3.tsv", delim = "\t") -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_GO_BP_scr25_x_scr3$gseaplot_results$`microtubule cytoskeleton organization involved in mitosis (GO:1902850)`, -->
+<!--   gsea_results_rat_1_GO_BP_scr25_x_scr3$gseaplot_results$`mitotic spindle organization (GO:0007052)`, -->
+<!--   gsea_results_rat_1_GO_BP_scr25_x_scr3$gseaplot_results$`centromere complex assembly (GO:0034508)`, -->
+<!--   gsea_results_rat_1_GO_BP_scr25_x_scr3$gseaplot_results$`regulation of ERK1 and ERK2 cascade (GO:0070372)`, -->
+<!--   gsea_results_rat_1_GO_BP_scr25_x_scr3$gseaplot_results$`sister chromatid segregation (GO:0000819)` -->
+<!--   ) -->
+
+<!-- tic() -->
+<!-- gsea_results_rat_1_GO_BP_si25_x_si3 <- gsea_analysis(sorted_genes = rat_1_order_ranked_list$si25_x_si3, database = GO_Biological_Process_2021) -->
+<!-- toc() -->
+
+<!-- gsea_results_rat_1_GO_BP_si25_x_si3$gsea_results %>%  -->
+<!--   mutate_at(.vars = c("pval", "padj"), .funs = . %>% formatC(digits = 2, format = "e")) %>%  -->
+<!--   mutate_at(.vars = c("log2err", "ES", "NES"), .funs = . %>% formatC(digits = 2, format = "f")) %>%  -->
+<!--   vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/gsea_results_rat_1_GO_BP_si25_x_si3.tsv", delim = "\t") -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`microtubule cytoskeleton organization involved in mitosis (GO:1902850)`, -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`mitotic spindle organization (GO:0007052)`, -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`regulation of cell cycle phase transition (GO:1901987)`, -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`adenylate cyclase-modulating G protein-coupled receptor signaling pathway (GO:0007188)` -->
+<!--   ) -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`anaphase-promoting complex-dependent catabolic process (GO:0031145)`, -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`regulation of mitotic cell cycle phase transition (GO:1901990)`, -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`cilium movement (GO:0003341)`, -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`regulation of mitotic cell cycle (GO:0007346)` -->
+<!-- ) -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`retinoid metabolic process (GO:0001523)`, -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`sister chromatid segregation (GO:0000819)`, -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`axonemal dynein complex assembly (GO:0070286)`, -->
+<!--   gsea_results_rat_1_GO_BP_si25_x_si3$gseaplot_results$`regulation of microglial cell activation (GO:1903978)` -->
+<!-- ) -->
+
+<!-- ``` -->
+
+<!-- # GO BP GSEA - rat_1 -->
+<!-- ```{r} -->
+<!-- rat_1_edgeR_results_no_NA <- rat_1_edgeR_results %>% purrr::map(drop_na, rgd_symbol) -->
+
+<!-- rat_1_order_ranked_list <- rat_1_edgeR_results_no_NA %>%  -->
+<!--   purrr::map(arrange, desc(as.numeric(pi_value))) %>% -->
+<!--   purrr::map(distinct, rgd_symbol, .keep_all = TRUE) %>% -->
+<!--   purrr::map(mutate, rank = rank(pi_value, ties.method = "random")) %>%  -->
+<!--   purrr::map(arrange, desc(rank)) %>% -->
+<!--   purrr::map(dplyr::select, c(rgd_symbol, rank)) %>%  -->
+<!--   purrr::map(mutate, rgd_symbol = rgd_symbol %>% str_to_upper()) -->
+
+<!-- rat_1_gene_list <- purrr::map(seq_along(rat_1_order_ranked_list), function(i) { -->
+<!--   rat_1_order_ranked_list[[i]] %>%  -->
+<!--   pull(as.numeric(rank)) %>% -->
+<!--   purrr::set_names(rat_1_order_ranked_list[[i]]$rgd_symbol)} -->
+<!--   ) %>% -->
+<!--   purrr::set_names(names(rat_1_edgeR_results)) -->
+
+
+<!-- rat_1_gse_GO_BP_results_list <- purrr::map(seq_along(rat_1_gene_list), function(i) gseGO(geneList = rat_1_gene_list[[i]], keyType = "ENSEMBL", exponent = 1, ont = "BP", OrgDb =  "org.Hs.eg.db", eps = 0)) %>% purrr::set_names(source) -->
+
+
+<!-- rat_1_gse_GO_BP_results_list$Cortex_Motor_Medial@result -->
+<!-- rat_1_gse_GO_BP_results_list$Cortex_Motor_Lateral@result -->
+<!-- rat_1_gse_GO_BP_results_list$Spinal_Cord_Cervical@result -->
+<!-- rat_1_gse_GO_BP_results_list$Spinal_Cord_Thoracic@result -->
+<!-- rat_1_gse_GO_BP_results_list$Spinal_Cord_Lumbar@result -->
+<!-- rat_1_gse_GO_BP_results_list$Cerebellum@result -->
+
+<!-- enrichplot::gseaplot2(rat_1_gse_GO_BP_results_list$Cortex_Motor_Medial,  -->
+<!--                       geneSetID = 1,  -->
+<!--                       title = gse_GO_BP_results_list$Cortex_Motor_Medial@result$Description[1]) -->
+
+<!-- enrichplot::gseaplot2(gse_GO_BP_results_list$Cortex_Motor_Lateral,  -->
+<!--                       geneSetID = 1,  -->
+<!--                       title = gse_GO_BP_results_list$Spinal_Cord_Cervical@result$Description[1]) -->
+
+<!-- enrichplot::gseaplot2(gse_GO_BP_results_list$Spinal_Cord_Cervical,  -->
+<!--                       geneSetID = 1,  -->
+<!--                       title = gse_GO_BP_results_list$Spinal_Cord_Cervical@result$Description[1]) -->
+<!-- ``` -->
+
+<!-- # GSEA - rat_2 -->
+<!-- ```{r} -->
+<!-- rat_2_edgeR_results_no_NA <- rat_2_edgeR_results %>% purrr::map(drop_na, rgd_symbol) -->
+
+<!-- rat_2_order_ranked_list <- rat_2_edgeR_results_no_NA %>%  -->
+<!--   purrr::map(arrange, desc(as.numeric(pi_value))) %>% -->
+<!--   purrr::map(distinct, rgd_symbol, .keep_all = TRUE) %>% -->
+<!--   purrr::map(mutate, rank = rank(pi_value, ties.method = "random")) %>%  -->
+<!--   purrr::map(arrange, desc(rank)) %>% -->
+<!--   purrr::map(dplyr::select, c(rgd_symbol, rank)) %>%  -->
+<!--   purrr::map(mutate, rgd_symbol = rgd_symbol %>% str_to_upper()) -->
+
+<!-- rat_2_order_ranked_list <- purrr::map(seq_along(rat_2_order_ranked_list), function(i) { -->
+<!--   rat_2_order_ranked_list[[i]] %>%  -->
+<!--   pull(as.numeric(rank)) %>% -->
+<!--   purrr::set_names(rat_2_order_ranked_list[[i]]$rgd_symbol)} -->
+<!--   ) %>% -->
+<!--   purrr::set_names(names(rat_2_edgeR_results)) -->
+
+<!-- tic() -->
+<!-- gsea_results_rat_2_KEGG_Ct25_x_Ct3 <- gsea_analysis(sorted_genes = rat_2_order_ranked_list$Ct25_x_Ct3, database = KEGG_2019_Mouse) -->
+<!-- toc() -->
+
+<!-- gsea_results_rat_2_KEGG_Ct25_x_Ct3$gsea_results %>%  -->
+<!--   mutate_at(.vars = c("pval", "padj"), .funs = . %>% formatC(digits = 2, format = "e")) %>%  -->
+<!--   mutate_at(.vars = c("log2err", "ES", "NES"), .funs = . %>% formatC(digits = 2, format = "f")) %>%  -->
+<!--   vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/gsea_results_rat_2_KEGG_Ct25_x_Ct3.tsv", delim = "\t") -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$Lysosome, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`DNA replication`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Neuroactive ligand-receptor interaction`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Maturity onset diabetes of the young` -->
+<!--   ) -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Metabolism of xenobiotics by cytochrome P450`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`TGF-beta signaling pathway`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Cell cycle`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Drug metabolism` -->
+<!--   ) -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Type II diabetes mellitus`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Chemical carcinogenesis`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Cytokine-cytokine receptor interaction`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Glycosaminoglycan degradation` -->
+<!--   ) -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Basal cell carcinoma`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Other glycan degradation`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Glycosphingolipid biosynthesis`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Parathyroid hormone synthesis, secretion and action`, -->
+<!--   gsea_results_rat_2_KEGG_Ct25_x_Ct3$gseaplot_results$`Rheumatoid arthritis` -->
+<!--   ) -->
+
+<!-- tic() -->
+<!-- gsea_results_rat_2_GO_BP_Ct25_x_Ct3 <- gsea_analysis(sorted_genes = rat_2_order_ranked_list$Ct25_x_Ct3, database = GO_Biological_Process_2021) -->
+<!-- toc() -->
+
+<!-- gsea_results_rat_2_GO_BP_Ct25_x_Ct3$gsea_results %>%  -->
+<!--   mutate_at(.vars = c("pval", "padj"), .funs = . %>% formatC(digits = 2, format = "e")) %>%  -->
+<!--   mutate_at(.vars = c("log2err", "ES", "NES"), .funs = . %>% formatC(digits = 2, format = "f")) %>%  -->
+<!--   vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/gsea_results_rat_2_GO_BP_Ct25_x_Ct3.tsv", delim = "\t") -->
+
+<!-- cowplot::plot_grid( -->
+<!--   gsea_results_rat_2_GO_BP_Ct25_x_Ct3$gseaplot_results$`microtubule cytoskeleton organization involved in mitosis (GO:1902850)`, -->
+<!--   gsea_results_rat_2_GO_BP_Ct25_x_Ct3$gseaplot_results$`mitotic spindle organization (GO:0007052)`, -->
+<!--   gsea_results_rat_2_GO_BP_Ct25_x_Ct3$gseaplot_results$`carbohydrate catabolic process (GO:0016052)` -->
+<!--   ) -->
+<!-- ``` -->
+
+# GSEA - mouse
+```{r}
+mouse_edgeR_results_no_NA <- mouse_edgeR_results %>% purrr::map(drop_na, mgi_symbol)
+
+mouse_order_ranked_list <- mouse_edgeR_results_no_NA %>% 
+  purrr::map(arrange, desc(as.numeric(pi_value))) %>%
+  purrr::map(distinct, mgi_symbol, .keep_all = TRUE) %>%
+  purrr::map(mutate, rank = rank(pi_value, ties.method = "random")) %>% 
+  purrr::map(arrange, desc(rank)) %>%
+  purrr::map(dplyr::select, c(mgi_symbol, rank)) %>% 
+  purrr::map(mutate, mgi_symbol = mgi_symbol %>% str_to_upper())
+
+mouse_order_ranked_list <- purrr::map(seq_along(mouse_order_ranked_list), function(i) {
+  mouse_order_ranked_list[[i]] %>% 
+  pull(as.numeric(rank)) %>%
+  purrr::set_names(mouse_order_ranked_list[[i]]$mgi_symbol)}
+  ) %>%
+  purrr::set_names(names(mouse_edgeR_results))
+
+tic()
+gsea_results_mouse_KEGG_Mplus_x_M <- gsea_analysis(sorted_genes = mouse_order_ranked_list$Mplus_x_M, database = KEGG_2019_Mouse)
+toc()
+
+# gsea_results_mouse_KEGG_Mplus_x_M$gsea_results %>% 
+  # mutate_at(.vars = c("pval", "padj"), .funs = . %>% formatC(digits = 2, format = "e")) %>% 
+  # mutate_at(.vars = c("log2err", "ES", "NES"), .funs = . %>% formatC(digits = 2, format = "f")) %>% 
+  # vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/gsea_results_mouse_KEGG_Mplus_x_M.tsv", delim = "\t")
+
+cowplot::plot_grid(
+  gsea_results_mouse_KEGG_Mplus_x_M$gseaplot_results$`Chemical carcinogenesis`,
+  gsea_results_mouse_KEGG_Mplus_x_M$gseaplot_results$`Retinol metabolism`,
+  gsea_results_mouse_KEGG_Mplus_x_M$gseaplot_results$`Drug metabolism`,
+  gsea_results_mouse_KEGG_Mplus_x_M$gseaplot_results$`Epstein-Barr virus infection`
+  )
+
+cowplot::plot_grid(
+  gsea_results_mouse_KEGG_Mplus_x_M$gseaplot_results$`Steroid hormone biosynthesis`,
+  gsea_results_mouse_KEGG_Mplus_x_M$gseaplot_results$`Metabolism of xenobiotics by cytochrome P450`,
+  gsea_results_mouse_KEGG_Mplus_x_M$gseaplot_results$`Neuroactive ligand-receptor interaction`,
+  gsea_results_mouse_KEGG_Mplus_x_M$gseaplot_results$`Pancreatic secretion`
+  )
+
+
+
+tic()
+gsea_results_mouse_KEGG_Wplus_x_W <- gsea_analysis(sorted_genes = mouse_order_ranked_list$Wplus_x_W, database = KEGG_2019_Mouse)
+toc()
+
+# gsea_results_mouse_KEGG_Wplus_x_W$gsea_results %>% 
+#   mutate_at(.vars = c("pval", "padj"), .funs = . %>% formatC(digits = 2, format = "e")) %>% 
+#   mutate_at(.vars = c("log2err", "ES", "NES"), .funs = . %>% formatC(digits = 2, format = "f")) %>% 
+#   vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/gsea_results_mouse_KEGG_Wplus_x_W.tsv", delim = "\t")
+
+cowplot::plot_grid(
+  gsea_results_mouse_KEGG_Wplus_x_W$gseaplot_results$`Cell adhesion molecules (CAMs)`,
+  gsea_results_mouse_KEGG_Wplus_x_W$gseaplot_results$`Hematopoietic cell lineage`,
+  gsea_results_mouse_KEGG_Wplus_x_W$gseaplot_results$`Complement and coagulation cascades`,
+  gsea_results_mouse_KEGG_Wplus_x_W$gseaplot_results$`Retinol metabolism`
+  )
+
+cowplot::plot_grid(
+  gsea_results_mouse_KEGG_Wplus_x_W$gseaplot_results$`Protein digestion and absorption`,
+  gsea_results_mouse_KEGG_Wplus_x_W$gseaplot_results$`Cytokine-cytokine receptor interaction`,
+  gsea_results_mouse_KEGG_Wplus_x_W$gseaplot_results$`Graft-versus-host disease`,
+  gsea_results_mouse_KEGG_Wplus_x_W$gseaplot_results$`Epstein-Barr virus infection`
+  )
+
+
+
+tic()
+gsea_results_mouse_GO_BP_Mplus_x_M <- gsea_analysis(sorted_genes = mouse_order_ranked_list$Mplus_x_M, database = GO_Biological_Process_2021)
+toc()
+
+# gsea_results_mouse_GO_BP_Mplus_x_M$gsea_results %>% 
+#   mutate_at(.vars = c("pval", "padj"), .funs = . %>% formatC(digits = 2, format = "e")) %>% 
+#   mutate_at(.vars = c("log2err", "ES", "NES"), .funs = . %>% formatC(digits = 2, format = "f")) %>% 
+#   vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/gsea_results_mouse_GO_BP_Mplus_x_M.tsv", delim = "\t")
+
+cowplot::plot_grid(
+  gsea_results_mouse_GO_BP_Mplus_x_M$gseaplot_results$`extracellular matrix organization (GO:0030198)`,
+  gsea_results_mouse_GO_BP_Mplus_x_M$gseaplot_results$`external encapsulating structure organization (GO:0045229)`,
+  gsea_results_mouse_GO_BP_Mplus_x_M$gseaplot_results$`extracellular structure organization (GO:0043062)`,
+  gsea_results_mouse_GO_BP_Mplus_x_M$gseaplot_results$`regulation of ERK1 and ERK2 cascade (GO:0070372)`
+  )
+
+cowplot::plot_grid(
+  gsea_results_mouse_GO_BP_Mplus_x_M$gseaplot_results$`positive regulation of MAPK cascade (GO:0043410)`,
+  gsea_results_mouse_GO_BP_Mplus_x_M$gseaplot_results$`inflammatory response (GO:0006954)`,
+  gsea_results_mouse_GO_BP_Mplus_x_M$gseaplot_results$`carbohydrate catabolic process (GO:0016052)`,
+  gsea_results_mouse_GO_BP_Mplus_x_M$gseaplot_results$`cellular amino acid catabolic process (GO:0009063)`
+  )
+
+
+tic()
+gsea_results_mouse_GO_BP_Wplus_x_W <- gsea_analysis(sorted_genes = mouse_order_ranked_list$Wplus_x_W, database = GO_Biological_Process_2021)
+toc()
+
+# gsea_results_mouse_GO_BP_Wplus_x_W$gsea_results %>% 
+#   mutate_at(.vars = c("pval", "padj"), .funs = . %>% formatC(digits = 2, format = "e")) %>% 
+#   mutate_at(.vars = c("log2err", "ES", "NES"), .funs = . %>% formatC(digits = 2, format = "f")) %>% 
+#   vroom::vroom_write(file = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/gsea_results_mouse_GO_BP_Wplus_x_W.tsv", delim = "\t")
+
+cowplot::plot_grid(
+  gsea_results_mouse_GO_BP_Wplus_x_W$gseaplot_results$`extracellular matrix organization (GO:0030198)`,
+  gsea_results_mouse_GO_BP_Wplus_x_W$gseaplot_results$`external encapsulating structure organization (GO:0045229)`,
+  gsea_results_mouse_GO_BP_Wplus_x_W$gseaplot_results$`extracellular structure organization (GO:0043062)`,
+  gsea_results_mouse_GO_BP_Wplus_x_W$gseaplot_results$`regulation of cell migration (GO:0030334)`
+  )
+
+cowplot::plot_grid(
+  gsea_results_mouse_GO_BP_Wplus_x_W$gseaplot_results$`positive regulation of tyrosine phosphorylation of STAT protein (GO:0042531)`,
+  gsea_results_mouse_GO_BP_Wplus_x_W$gseaplot_results$`regulation of immune response (GO:0050776)`,
+  gsea_results_mouse_GO_BP_Wplus_x_W$gseaplot_results$`cellular response to cytokine stimulus (GO:0071345)`,
+  gsea_results_mouse_GO_BP_Wplus_x_W$gseaplot_results$`cytokine-mediated signaling pathway (GO:0019221)`
+  )
+```
+
+
+
+
+# CEMiTool - Mouse
+```{r}
+library(CEMiTool)
+library(doParallel)
+n_threads <- makeCluster(40)
+registerDoParallel(n_threads)
+
+mouse_gene_id_dict <- vroom::vroom(paste0(path_to_data, "mouse_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+
+# mouse_filtered_count_data <- mouse_filtered_count_data %>% 
+#   as.data.frame() %>% 
+#   rownames_to_column(var = "ensembl_gene_id") %>% 
+#   left_join(mouse_gene_id_dict) %>% 
+#   mutate(mgi_symbol = mgi_symbol %>% make.unique()) %>% 
+#   mutate(mgi_symbol = mgi_symbol %>% replace_na(replace = "NA.0")) %>% 
+#   mutate(mgi_symbol = mgi_symbol %>% str_to_upper()) %>% 
+#   rownames_to_column(var = "mgi_symbol") %>% 
+#   dplyr::select(names(mouse_filtered_count_data)) %>% 
+#   as.matrix()
+#   
+
+mouse_sample_annotation = data.frame(
+  "sample_name" = rownames(mouse_design_df), 
+  "class" = mouse_design_df$condition
+  )
+
+mouse_WGCNA_tpm <- DGEList(
+  counts = mouse_filtered_count_data, 
+  lib.size = colSums(mouse_filtered_count_data), 
+  group = mouse_group) %>% 
+  calcNormFactors("TMM") %>% 
+  cpm(normalized.lib.sizes = TRUE) %>% 
+  as.data.frame()
+
+mouse_results <- new_cem(
+  expr = as.data.frame(mouse_WGCNA_tpm), 
+  sample_annot = mouse_sample_annotation,
+  sample_name_column = "sample_name", 
+  class_column = "class",
+  filter = FALSE,
+  apply_vst = FALSE,
+  filter_pval = 0.05
+  )
+
+# mouse_results_list <- purrr::map(10:20, function(i) {
+#   print(i)
+#   find_modules(mouse_results,
+#                cor_method = 'pearson',
+#                cor_function = 'cor',
+#                eps = 0.1,
+#                min_ngen = i,
+#                merge_similar = TRUE,
+#                diss_thresh = 0.75,
+#                network_type = 'unsigned',
+#                tom_type = 'signed',
+#                set_beta = NULL,
+#                force_beta = TRUE,
+#                verbose = TRUE) 
+#   })
+# 
+# mouse_results_list %>% qs::qsave(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/Physiology_Institute_RNA_Seq/mouse_CEMiTool.qs", nthreads = 50)
+# 
+# data.frame(
+#   minimum_n_genes = 10:20, 
+#   n_modules = unlist(purrr::map(mouse_results_list, nmodules))
+#   ) %>% 
+#   ggplot(aes(x = minimum_n_genes, y = n_modules)) + 
+#   geom_point() + 
+#   geom_line() +
+#   theme_bw()
+
+# Choice, minimum 15 genes
+mouse_cem <- mouse_results_list[[6]]
+
+mouse_cem <- find_modules(mouse_results,
+               cor_method = 'pearson',
+               cor_function = 'cor',
+               eps = 0.1,
+               min_ngen = 15,
+               merge_similar = TRUE,
+               diss_thresh = 0.75,
+               network_type = 'unsigned',
+               tom_type = 'signed',
+               set_beta = NULL,
+               force_beta = TRUE,
+               verbose = TRUE) 
+
+# Genes vs Modules df 
+mouse_gene_modules_df = module_genes(mouse_cem) %>% arrange(modules)
+
+# GSEA
+mouse_cem <- mouse_cem %>% mod_gsea() %>% plot_gsea()
+mouse_cem %>% show_plot(value = "gsea")
+
+mouse_cem <- mouse_cem %>% plot_profile()
+mouse_plots_list <- mouse_cem %>% show_plot(value = "profile")
+
+mouse_cem <- mouse_cem %>% CEMiTool::plot_beta_r2()
+mouse_cem %>% show_plot(value = "beta_r2")
+
+mouse_results_list %>% qs::qsave(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/Physiology_Institute_RNA_Seq/mouse_CEMiTool.qs", nthreads = 50)
+```
+
+# CEMiTool - rat 1
+```{r}
+# rat_1_filtered_count_data
+
+rat_1_sample_annotation = data.frame(
+  "sample_name" = rownames(rat_1_design_df), 
+  "class" = rat_1_design_df$condition
+  )
+
+rat_1_gene_id_dict <- vroom::vroom(paste0(path_to_data, "rat_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+
+
+rat_1_sample_annotation = data.frame(
+  "sample_name" = rownames(rat_1_design_df), 
+  "class" = rat_1_design_df$condition
+  )
+
+rat_1_WGCNA_tpm <- DGEList(
+  counts = rat_1_filtered_count_data, 
+  lib.size = colSums(rat_1_filtered_count_data), 
+  group = rat_1_group) %>% 
+  calcNormFactors("TMM") %>% 
+  cpm(normalized.lib.sizes = TRUE) %>% 
+  as.data.frame()
+
+rat_1_results <- new_cem(
+  expr = as.data.frame(rat_1_WGCNA_tpm), 
+  sample_annot = rat_1_sample_annotation,
+  sample_name_column = "sample_name", 
+  class_column = "class",
+  filter = FALSE,
+  apply_vst = FALSE,
+  filter_pval = 0.05
+  )
+
+# rat_1_results_list <- purrr::map(10:20, function(i) {
+#   print(i)
+#   find_modules(rat_1_results,
+#                cor_method = 'pearson',
+#                cor_function = 'cor',
+#                eps = 0.1,
+#                min_ngen = i,
+#                merge_similar = TRUE,
+#                diss_thresh = 0.75,
+#                network_type = 'unsigned',
+#                tom_type = 'signed',
+#                set_beta = NULL,
+#                force_beta = TRUE,
+#                verbose = TRUE)
+#   })
+# 
+# rat_1_results_list %>% qs::qsave(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/Physiology_Institute_RNA_Seq/rat_1_CEMiTool.qs", nthreads = 50)
+# 
+# data.frame(
+#   minimum_n_genes = 10:20,
+#   n_modules = unlist(purrr::map(rat_1_results_list, nmodules))
+#   ) %>%
+#   ggplot(aes(x = minimum_n_genes, y = n_modules)) +
+#   geom_point() +
+#   geom_line() +
+#   theme_bw()
+# 
+# 
+# # Choice, minimum 11 genes
+# rat_1_cem <- rat_1_results_list[[2]]
+
+rat_1_cem <- find_modules(rat_1_results,
+               cor_method = 'pearson',
+               cor_function = 'cor',
+               eps = 0.1,
+               min_ngen = 11,
+               merge_similar = TRUE,
+               diss_thresh = 0.75,
+               network_type = 'unsigned',
+               tom_type = 'signed',
+               set_beta = NULL,
+               force_beta = TRUE,
+               verbose = TRUE) 
+
+# Genes vs Modules df 
+rat_1_gene_modules_df = module_genes(rat_1_cem) %>% arrange(modules)
+
+# GSEA
+rat_1_cem <- rat_1_cem %>% mod_gsea() %>% plot_gsea()
+rat_1_cem %>% show_plot(value = "gsea")
+
+rat_1_cem <- rat_1_cem %>% plot_profile()
+rat_1_plots_list <- rat_1_cem %>% show_plot(value = "profile")
+
+rat_1_cem <- rat_1_cem %>% CEMiTool::plot_beta_r2()
+rat_1_cem %>% show_plot(value = "beta_r2")
+
+rat_1_results_list %>% qs::qsave(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/Physiology_Institute_RNA_Seq/rat_1_CEMiTool.qs", nthreads = 50)
+```
+
+# CEMiTool - rat 2
+```{r}
+rat_2_sample_annotation = data.frame(
+  "sample_name" = rownames(rat_2_design_df), 
+  "class" = rat_2_design_df$condition
+  )
+
+rat_2_gene_id_dict <- vroom::vroom(paste0(path_to_data, "rat_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+
+rat_2_sample_annotation = data.frame(
+  "sample_name" = rownames(rat_2_design_df), 
+  "class" = rat_2_design_df$condition
+  )
+
+rat_2_WGCNA_tpm <- DGEList(
+  counts = rat_2_filtered_count_data, 
+  lib.size = colSums(rat_2_filtered_count_data), 
+  group = rat_2_group) %>% 
+  calcNormFactors("TMM") %>% 
+  cpm(normalized.lib.sizes = TRUE) %>% 
+  as.data.frame()
+
+rat_2_results <- new_cem(
+  expr = as.data.frame(rat_2_WGCNA_tpm), 
+  sample_annot = rat_2_sample_annotation,
+  sample_name_column = "sample_name", 
+  class_column = "class",
+  filter = FALSE,
+  apply_vst = FALSE,
+  filter_pval = 0.05
+  )
+
+rat_2_results_list <- purrr::map(10:20, function(i) {
+  print(i)
+  find_modules(rat_2_results,
+               cor_method = 'pearson',
+               cor_function = 'cor',
+               eps = 0.1,
+               min_ngen = i,
+               merge_similar = TRUE,
+               diss_thresh = 0.75,
+               network_type = 'unsigned',
+               tom_type = 'signed',
+               set_beta = NULL,
+               force_beta = TRUE,
+               verbose = TRUE)
+  })
+
+rat_2_results_list %>% qs::qsave(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/Physiology_Institute_RNA_Seq/rat_2_CEMiTool_list.qs", nthreads = 50)
+
+data.frame(
+  minimum_n_genes = 10:20,
+  n_modules = unlist(purrr::map(rat_2_results_list, nmodules))
+  ) %>%
+  ggplot(aes(x = minimum_n_genes, y = n_modules)) +
+  geom_point() +
+  geom_line() +
+  theme_bw()
+
+
+# Choice, minimum 11 genes
+rat_2_cem <- rat_2_results_list[[2]]
+
+rat_2_cem <- find_modules(rat_2_results,
+               cor_method = 'pearson',
+               cor_function = 'cor',
+               eps = 0.1,
+               min_ngen = 11,
+               merge_similar = TRUE,
+               diss_thresh = 0.75,
+               network_type = 'unsigned',
+               tom_type = 'signed',
+               set_beta = NULL,
+               force_beta = TRUE,
+               verbose = TRUE) 
+
+# Genes vs Modules df 
+rat_2_gene_modules_df = module_genes(rat_2_cem) %>% arrange(modules)
+
+# GSEA
+rat_2_cem <- rat_2_cem %>% mod_gsea() %>% plot_gsea()
+rat_2_cem %>% show_plot(value = "gsea")
+
+rat_2_cem <- rat_2_cem %>% plot_profile()
+rat_2_plots_list <- rat_2_cem %>% show_plot(value = "profile")
+
+rat_2_cem <- rat_2_cem %>% CEMiTool::plot_beta_r2()
+rat_2_cem %>% show_plot(value = "beta_r2")
+
+rat_2_results_list %>% qs::qsave(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/Physiology_Institute_RNA_Seq/rat_2_CEMiTool.qs", nthreads = 50)
+```

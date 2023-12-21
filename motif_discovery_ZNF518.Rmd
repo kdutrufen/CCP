@@ -1,0 +1,346 @@
+---
+title: "motif_discovery_ZNF518"
+author: "Carlos Eduardo Madureira Trufen"
+date: "2023-11-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r}
+library(Biostrings)
+library(GenomicRanges)
+library(motifStack)
+library(rtracklayer)
+library(tictoc)
+library(tidyverse)
+path_to_files <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/motif_ZNF518B_Olha_Pyko/"
+```
+
+# Bedtools columns
+```{r}
+# chrom - The name of the chromosome on which the genome feature exists.
+  # Any string can be used. For example, “chr1”, “III”, “myChrom”, “contig1112.23”.
+  # This column is required.
+# start - The zero-based starting position of the feature in the chromosome.
+  # The first base in a chromosome is numbered 0.
+  # The start position in each BED feature is therefore interpreted to be 1 greater than the start position listed in the feature. For example, start=9, end=20 is interpreted to span bases 10 through 20,inclusive.
+  # This column is required.
+# end - The one-based ending position of the feature in the chromosome.
+  # The end position in each BED feature is one-based. See example above.
+  # This column is required.
+# name - Defines the name of the BED feature.
+  # Any string can be used. For example, “LINE”, “Exon3”, “HWIEAS_0001:3:1:0:266#0/1”, or “my_Feature”.
+  # This column is optional.
+# score - The UCSC definition requires that a BED score range from 0 to 1000, inclusive. However, bedtools allows any string to be stored in this field in order to allow greater flexibility in annotation features. For example, strings allow scientific notation for p-values, mean enrichment values, etc. It should be noted that this flexibility could prevent such annotations from being correctly displayed on the UCSC browser.
+  # Any string can be used. For example, 7.31E-05 (p-value), 0.33456 (mean enrichment value), “up”, “down”, etc.
+  # This column is optional.
+# strand - Defines the strand - either ‘+’ or ‘-‘.
+  # This column is optional.
+# thickStart - The starting position at which the feature is drawn thickly.
+  # Allowed yet ignored by bedtools.
+# thickEnd - The ending position at which the feature is drawn thickly.
+  # Allowed yet ignored by bedtools.
+# itemRgb - An RGB value of the form R,G,B (e.g. 255,0,0).
+  # Allowed yet ignored by bedtools.
+# blockCount - The number of blocks (exons) in the BED line.
+  # Allowed yet ignored by bedtools.
+# blockSizes - A comma-separated list of the block sizes.
+# blockStarts - A comma-separated list of block starts.
+```
+
+
+```{r}
+# (
+# string chrom; "Reference sequence chromosome or scaffold"
+# uint chromStart; "Start position in chromosome"
+# uint chromEnd; "End position in chromosome"
+# string name; "Name given to a region (preferably unique). Use . if no name is assigned"
+# uint score; "Indicates how dark the peak will be displayed in the browser (0-1000) "
+# char[1] strand; "+ or - or . for unknown"
+# float signalValue; "Measurement of average enrichment for the region"
+# float pValue; "Statistical significance of signal value (-log10). Set to -1 if not used."
+# float qValue; "Statistical significance with multiple-test correction applied (FDR -log10). Set to -1 if not used."
+# int peak; "Point-source called for this peak; 0-based offset from chromStart. Set to -1 if no point-source called."
+# )
+```
+
+
+```{r}
+# ENCFF096AYV_bed <- read_delim(
+#   file = paste0(path_to_files, "IDR_thresholded_peaks_ENCFF096AYV.bed.gz"), 
+#   delim = "\t", 
+#   escape_double = FALSE, 
+#   col_names = FALSE, 
+#   trim_ws = TRUE
+#   )
+# 
+# ENCFF096AYV_bed <- ENCFF096AYV_bed %>% purrr::set_names("chrom", "chromStart", "chromEnd", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")
+# 
+# ENCFF551EXT_bed <- read_delim(
+#   file = paste0(path_to_files, "IDR_thresholded_peaks_ENCFF551EXT.bed.gz"), 
+#   delim = "\t", 
+#   escape_double = FALSE, 
+#   col_names = FALSE, 
+#   trim_ws = TRUE
+#   )
+# 
+# ENCFF577GJK_bed <- read_delim(
+#   file = paste0(path_to_files, "IDR_thresholded_peaks_ENCFF577GJK.bed.gz"), 
+#   delim = "\t", 
+#   escape_double = FALSE, 
+#   col_names = FALSE, 
+#   trim_ws = TRUE
+#   )
+
+IDR_thresholded_peaks_files <- list.files(
+  path = path_to_files, 
+  pattern = "IDR_thresholded_peaks.*.bed.gz", 
+  full.names = TRUE
+  )
+
+IDR_thresholded_peaks_list <- IDR_thresholded_peaks_files %>% purrr::map(read_delim,
+  delim = "\t",
+  escape_double = FALSE,
+  col_names = FALSE,
+  trim_ws = TRUE
+) %>% purrr::set_names("ENCFF096AYV", "ENCFF551EXT", "ENCFF577GJK")
+
+IDR_thresholded_peaks_list <- IDR_thresholded_peaks_list %>% 
+  purrr::map(purrr::set_names, c("chrom", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak"))
+
+IDR_thresholded_peaks_df <- IDR_thresholded_peaks_list %>% 
+  bind_rows(.id = "bed_file")
+
+gene_bed_list <- IDR_thresholded_peaks_df %>% 
+  mutate(width = end - start + 1) %>% 
+  arrange(desc(width)) %>% 
+  dplyr::filter(width %in% c(337, 277, 361)) %>% 
+  split(f = .$width)
+
+nucleotide_lengths <- gene_bed_list %>% names()
+# IDR_ranked_peaks_ENCFF029JLZ_bed <- read_delim(
+#   file = paste0(path_to_files, "IDR_ranked_peaks_ENCFF029JLZ.bed.gz"), 
+#   delim = "\t", 
+#   escape_double = FALSE, 
+#   col_names = FALSE, 
+#   trim_ws = TRUE
+#   )
+# 
+# IDR_ranked_peaks_ENCFF213GAK_bed <- read_delim(
+#   file = paste0(path_to_files, "IDR_ranked_peaks_ENCFF213GAK.bed.gz"), 
+#   delim = "\t", 
+#   escape_double = FALSE, 
+#   col_names = FALSE, 
+#   trim_ws = TRUE
+#   )
+# 
+# IDR_ranked_peaks_ENCFF313ZWT_bed <- read_delim(
+#   file = paste0(path_to_files, "IDR_ranked_peaks_ENCFF313ZWT.bed.gz"), 
+#   delim = "\t", 
+#   escape_double = FALSE, 
+#   col_names = FALSE, 
+#   trim_ws = TRUE
+#   )
+# 
+# IDR_ranked_peaks_ENCFF929AVK_bed <- read_delim(
+#   file = paste0(path_to_files, "IDR_ranked_peaks_ENCFF929AVK.bed.gz"), 
+#   delim = "\t", 
+#   escape_double = FALSE, 
+#   col_names = FALSE, 
+#   trim_ws = TRUE
+#   )
+# 
+# IDR_ranked_peaks_files <- list.files(
+#   path = path_to_files, 
+#   pattern = "IDR_ranked_peaks.*.bed.gz", 
+#   full.names = TRUE
+#   )
+# 
+# IDR_ranked_peaks_list <- IDR_ranked_peaks_files %>% purrr::map(read_delim,
+#   delim = "\t",
+#   escape_double = FALSE,
+#   col_names = FALSE,
+#   trim_ws = TRUE
+# )
+# 
+# IDR_ranked_peaks_list <- IDR_ranked_peaks_list %>% 
+#   purrr::map(purrr::set_names, c("chrom", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak"))
+
+```
+
+# Extract the genome sequences for each region:
+
+```{r}
+genome <- BSgenome.Hsapiens.UCSC.hg38::BSgenome.Hsapiens.UCSC.hg38
+# sequences_list <- purrr::map(seq_along(gene_bed$name), function(i) getSeq(genome, gene_bed$chrom[i], gene_bed$start[i], gene_bed$end[i]))
+# sequences <- getSeq(genome, gene_bed$chrom, gene_bed$start, gene_bed$end)
+
+# tic()
+# sequences <- getSeq(genome, gene_bed_df$chrom, gene_bed_df$start, gene_bed_df$end)
+# toc()
+
+sequence_list <- purrr::map(seq_along(gene_bed_list), function(i) {
+  # tic()
+  print(i)
+  getSeq(genome, gene_bed_list[[i]]$chrom, gene_bed_list[[i]]$start, gene_bed_list[[i]]$end)
+  # toc()
+  })
+
+sequence_list <- sequence_list %>% purrr::set_names(nucleotide_lengths)
+
+# sequences %>% qs::qsave(paste0(path_to_files, "sequences.qs"), nthreads = 50)
+# sequences <- qs::qread(paste0(path_to_files, "sequences.qs"), nthreads = 50)
+
+# sequence_list %>% qs::qsave(paste0(path_to_files, "sequence_list.qs"), nthreads = 50)
+sequence_list <- qs::qread(paste0(path_to_files, "sequence_list.qs"), nthreads = 50)
+
+for (i in seq_along(sequence_list)) {
+  sequence_list[[i]]@ranges@NAMES <- sequence_list[[i]]@ranges@NAMES %>% paste0("_seq_", 1:length(.))
+}
+
+
+# gene_bed_subset <- gene_bed[1:10, ]
+# sequences_list <- getSeq(genome, gene_bed_subset$chrom, gene_bed_subset$start, gene_bed_subset$end)
+# 
+# getSeq(genome, gene_bed$chrom[1], start = gene_bed$start[1], end = gene_bed$end[1])
+```
+
+# Create fasta files
+```{r}
+sequence_list$`277` %>% Biostrings::writeXStringSet(filepath = paste0(path_to_files, "ZNF518_277_nt_length.fa"))
+sequence_list$`337` %>% Biostrings::writeXStringSet(filepath = paste0(path_to_files, "ZNF518_337_nt_length.fa"))
+sequence_list$`361` %>% Biostrings::writeXStringSet(filepath = paste0(path_to_files, "ZNF518_361_nt_length.fa"))
+```
+
+# Run MEME-ChIP
+```{r}
+# time meme-chip -dna -minw 6 -maxw 15 ZNF518_277_nt_length.fa
+# time meme-chip -dna -minw 6 -maxw 15 ZNF518_337_nt_length.fa
+# time meme-chip -dna -minw 6 -maxw 15 ZNF518_361_nt_length.fa
+```
+
+
+# Load motifs
+```{r}
+library(tidysq)
+library(ggseqlogo)
+
+path_list_1 <- list.files(path = paste0(path_to_files, "ZNF518_277_nt_length_memechip_out"), pattern = "fimo", full.names = TRUE)
+path_list_2 <- list.files(path = paste0(path_to_files, "ZNF518_337_nt_length_memechip_out"), pattern = "fimo", full.names = TRUE)
+path_list_3 <- list.files(path = paste0(path_to_files, "ZNF518_361_nt_length_memechip_out"), pattern = "fimo", full.names = TRUE)
+
+path_list <- c(path_list_1, path_list_2, path_list_3)
+
+file_list <- list.files(path = path_list, pattern = ".tsv", full.names = TRUE)
+
+fimo_result_list <- file_list %>% purrr::map(function(x) x %>% read_delim(delim = "\t", escape_double = FALSE, trim_ws = TRUE))
+
+fimo_result_list <- fimo_result_list %>% purrr::map(drop_na, matched_sequence)
+
+consensus_figure_list <- purrr::map(seq_along(fimo_result_list), function(i) ggplot() + geom_logo( fimo_result_list[[i]]$matched_sequence ) + theme_logo() )
+
+consensus_figure_list <- consensus_figure_list %>% purrr::set_names(c(paste0("277_nt_motif_", 1:6), paste0("337_nt_motif_", 1:5), paste0("361_nt_motif_", 1:3)))
+
+
+purrr::map(seq_along(consensus_figure_list), function(i) consensus_figure_list[[i]] %>% ggsave(filename = paste0(path_to_files, "consensus_figure_", names(consensus_figure_list)[i], ".png"), width = 5, height = 5, dpi = 900))
+
+```
+
+
+
+# Create a position frequency matrix (PFM) from the sequences:
+```{r}
+# pfm <- consensusMatrix(HNF4alpha)
+# pfm <- consensusMatrix(sequences)
+
+# fimo_result_list <- fimo_result_list %>% purrr::map(separate, sep = "_", col = "sequence_name", into = c("chrom", "seq", "number"))
+fimo_result_list <- fimo_result_list %>% purrr::map(mutate, width = stop - start)
+
+motif_list <- purrr::map(seq_along(fimo_result_list), function(i) {
+  # tic()
+  print(i)
+  DNAStringSet(fimo_result_list[[i]]$matched_sequence)
+  # toc()
+  })
+
+for (i in seq_along(motif_list)) {
+  motif_list[[i]]@ranges@NAMES <- fimo_result_list[[i]]$sequence_name
+}
+
+# Position Frequency Matrix
+pfm_list <- motif_list %>% purrr::map(function(x) x %>% consensusMatrix())
+
+DNA_BASES = c("A", "C", "G", "T")
+DNA_ALPHABET = c("A", "C", "G", "T", "M", "R", "W", "S", "Y", "K", "V", "H", "D", "B", "N", "-", "+")
+
+# pfm <- pfm[rownames(pfm) %in% DNA_ALPHABET, ]
+# pfm <- pfm[rownames(pfm) %in% DNA_BASES, ]
+
+pfm_list <- purrr::map(seq_along(pfm_list), function(i) pfm_list[[i]][rownames(pfm_list[[i]]) %in% DNA_BASES, ] )
+
+calculate_ppm <- function(pfm) {
+
+  ppm <- apply(pfm, 2, function(x) {
+    ppm <- x/sum(x) # Calculate probabilities
+    return(ppm) 
+  })
+
+  colnames(ppm) <- colnames(pfm)
+  
+  return(ppm)
+
+}
+
+# Position Probability Matrix
+ppm_list <- pfm_list %>% purrr::map(function(x) x %>% calculate_ppm())
+# ppm_list <- ppm_list %>% purrr::set_names(nucleotide_lengths)
+
+ppm_list %>% qs::qsave(paste0(path_to_files, "ppm_list.qs"), nthreads = 50)
+ppm_list <- qs::qread(paste0(path_to_files, "ppm_list.qs"), nthreads = 50)
+```
+
+# Write a .meme file
+```{r}
+# Load PPM file
+purrr::map(seq_along(ppm_list), function(i) {
+  
+  ppm_info <- ppm_list[[i]] %>%
+    t() %>%
+    as.data.frame()
+  ppm_info <- ppm_info %>% mutate_all(.funs = formatC, digits = 6, format = "f")
+  ppm_info <- ppm_info %>% mutate(`T` = `T` %>% paste("\n"))
+
+  # Convert to text
+  nums_strings <- apply(ppm_info, 1, function(x) {
+     paste(ppm_info, collapse = " ")  
+ })
+  
+  txt <- c()
+  for (j in 1:nrow(ppm_info)) {
+    txt <- paste0(txt, paste(ppm_info[j, ], collapse = " "), " ")
+  }
+
+  # Write MEME file
+  meme_txt <- "MEME version 4
+
+ALPHABET= ACGT
+
+strands: + - 
+
+Background letter frequencies
+A 0.25 C 0.25 G 0.25 T 0.25
+
+MOTIF ZNF518B"
+
+  meme_out <- paste(meme_txt, paste0("\nletter-probability matrix: alength= 4 w= ", nrow(ppm_info)), txt, sep = "\n")
+
+  writeLines(meme_out, paste0(path_to_files, "ZNF518B_motif_", i, ".meme"))
+})
+```
+

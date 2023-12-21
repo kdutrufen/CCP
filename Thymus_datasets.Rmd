@@ -1,0 +1,419 @@
+---
+title: "scRNAseq_Betul"
+author: "Carlos Eduardo Madureira Trufen"
+date: "2023-06-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+# library(anndata)
+library(AUCell)
+library(aplot)
+library(batchelor)
+# library(beachmat)
+library(biomaRt)
+library(bluster)
+library(cluster)
+library(celldex)
+library(corral)
+library(cowplot)
+# library(clusterProfiler)
+library(clustree)
+library(DESeq2)
+library(edgeR) 
+library(factoextra)
+library(ggeasy)
+library(ggpubr)
+library(GSEABase)
+library(HDF5Array)
+library(kBET)
+library(limma)
+library(Matrix)
+library(mmtable2)
+library(org.Mm.eg.db)
+library(msigdbr)
+library(patchwork)
+library(PCAtools)
+library(pheatmap)
+library(qs)
+library(Rhdf5lib)
+library(rhdf5)
+library(Seurat)
+library(slingshot)
+library(scran)
+library(scater)
+library(scDblFinder)
+library(scRNAseq)
+library(SingleCellExperiment)
+library(tictoc)
+library(tidyverse)
+library(TSCAN)
+library(uwot)
+library(zellkonverter)
+
+path_to_files <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNAseq_Betul/"
+# path_to_files <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/scRNAseq_Betul/"
+```
+
+# Load data
+```{r}
+path_to_files <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNAseq_Betul/"
+
+file_human_thymic_epithelial  <- path_to_files %>% paste0("human_thymic_epithelial.tsv")
+file_mouse_stromal <- path_to_files %>% paste0("mouse_stromal.tsv")
+file_human_atlas_thymus <- path_to_files %>% paste0("human_atlas_thymus.tsv")
+
+file_mouse_stromal_UMAP <- path_to_files %>% paste0("mouse_stromal_UMAP.tsv")
+
+file_human_thymic_epithelial_UMAP <- path_to_files %>% paste0("human_thymic_epithelial_UMAP.tsv")
+```
+
+# Load mouse_stromal data
+```{r}
+mouse_stromal_df <- file_mouse_stromal %>% read_tsv()
+
+# mouse_stromal_df <- mouse_stromal_df %>% 
+#   purrr::set_names(c("cell", names(mouse_stromal_UMAP_df)[2:ncol(.)]))
+
+mouse_stromal_df <- mouse_stromal_df %>% 
+  column_to_rownames(var = "index") %>% 
+  t() %>% 
+  as.data.frame()
+
+mouse_stromal_UMAP_df <- file_mouse_stromal_UMAP %>% 
+  read_tsv() %>% 
+  dplyr::select(-1) %>% 
+  purrr::set_names("UMAP_1", "UMAP_2", "cell", "cell_types", "age", "sample_ID")
+
+mouse_stromal_UMAP_df %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2, colour = cell_types)) +
+  geom_point() +
+  theme_bw()
+
+
+sce_mouse_stromal <- SingleCellExperiment(assays = list(logcounts = mouse_stromal_df), 
+                                          colData = colnames(mouse_stromal_df))
+
+sce_mouse_stromal@int_colData@listData$reducedDims$UMAP <- mouse_stromal_UMAP_df
+
+sce_mouse_stromal$cell <- mouse_stromal_UMAP_df$cell
+sce_mouse_stromal$cell_types <- mouse_stromal_UMAP_df$cell_types
+sce_mouse_stromal$age <- mouse_stromal_UMAP_df$age
+sce_mouse_stromal$sample_ID <- mouse_stromal_UMAP_df$sample_ID
+
+# sce_mouse_stromal %>% qs::qsave(paste0(path_to_files, "sce_mouse_stromal.qs"), nthreads = 6)
+sce_mouse_stromal <- qs::qread(paste0(path_to_files, "sce_mouse_stromal.qs"), nthreads = 6)
+```
+
+# Load human_thymic_epithelial data
+```{r}
+human_thymic_epithelial_df <- file_human_thymic_epithelial %>% read_tsv()
+
+# human_thymic_epithelial_df <- human_thymic_epithelial_df %>% 
+#   purrr::set_names(c("cell", names(human_thymic_epithelial_UMAP_df)[2:ncol(.)]))
+
+human_thymic_epithelial_df <- human_thymic_epithelial_df %>% 
+  column_to_rownames(var = "index") %>% 
+  t() %>% 
+  as.data.frame()
+
+human_thymic_epithelial_UMAP_df <- file_human_thymic_epithelial_UMAP %>% 
+  read_tsv() %>% 
+  dplyr::select(-1) %>% 
+  purrr::set_names("UMAP_1", "UMAP_2", "cell", "cell_types", "sample", "donor", "organ", "sort", "method", "file", "stage2", "age", "gender", "source")
+
+human_thymic_epithelial_UMAP_df %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2, colour = cell_types)) +
+  geom_point() +
+  theme_bw()
+
+
+sce_human_thymic_epithelial <- SingleCellExperiment(assays = list(logcounts = human_thymic_epithelial_df), 
+                                          colData = colnames(human_thymic_epithelial_df))
+
+sce_human_thymic_epithelial@int_colData@listData$reducedDims$UMAP <- human_thymic_epithelial_UMAP_df
+
+sce_human_thymic_epithelial %>% qs::qsave(paste0(path_to_files, "sce_human_thymic_epithelial.qs"), nthreads = 6)
+```
+
+# Fam83 gene expression
+```{r}
+gene_umap_plots <- function(gene, sce){
+  
+  umap_df <- sce@int_colData@listData$reducedDims$UMAP %>% as.data.frame()
+  umap_df <- umap_df %>% 
+    mutate(gene_expression = sce@assays@data$logcounts[gene,] %>% as.numeric()) %>% 
+    arrange(gene_expression)
+
+  umap_plot <- umap_df %>% ggplot(aes(x = UMAP_1, y = UMAP_2, color = gene_expression)) +
+    geom_point() +
+    scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+    theme_bw() + 
+    labs(x = "UMAP 1", y = "UMAP 2", title = gene)
+
+  return(umap_plot)
+}
+
+# gene_umap_plots(sce = sce_mouse_stromal, gene = "Fam83a")
+# gene_umap_plots(sce = sce_mouse_stromal, gene = "Fam83b")
+# gene_umap_plots(sce = sce_mouse_stromal, gene = "Fam83c")
+# gene_umap_plots(sce = sce_mouse_stromal, gene = "Fam83d")
+# gene_umap_plots(sce = sce_mouse_stromal, gene = "Fam83e")
+# gene_umap_plots(sce = sce_mouse_stromal, gene = "Fam83f")
+# gene_umap_plots(sce = sce_mouse_stromal, gene = "Fam83g")
+gene_umap_plots(sce = sce_mouse_stromal, gene = "Fam83h")
+```
+
+# Find DEGs in each cluster/cell type
+```{r}
+sce_mouse_stromal <- qs::qread(paste0(path_to_files, "sce_mouse_stromal.qs"), nthreads = 6)
+
+colLabels(sce_mouse_stromal) <- sce_mouse_stromal$cell_types
+
+markers <- sce_mouse_stromal %>% findMarkers(test = "binom", direction = "up", lfc = 1, pval.type = "any")
+markers_list <- purrr::map(seq_along(markers), function(i) markers[[i]])
+markers_list <- markers_list %>% purrr::set_names(sort(unique(sce_mouse_stromal$label)))
+DE_list <- purrr::map(seq_along(markers), function(i) markers_list[[i]] %>% as.data.frame() %>% dplyr::filter(FDR <= 0.05 & summary.logFC >= 1.0 & Top <= 10)) %>% purrr::set_names(names(markers_list))
+
+```
+
+
+```{r}
+cell_types_v <- sce_mouse_stromal$cell_types %>% unique()
+# sce_mouse_stromal[, sce_mouse_stromal$cell_types == cell_types_v[1]]
+
+# gene_v <- sce_mouse_stromal %>% rownames()
+gene_v <- DE_list %>% purrr::map(rownames) %>% unlist() %>% unique() %>% sort()
+gene_v <- sce_mouse_stromal %>% rownames()
+
+# gene_pair_df <- expand.grid(gene_1 = gene_v, gene_2 = gene_v) %>% 
+#   dplyr::filter(gene_1 != gene_2)
+# 
+# for (i in 1:nrow(gene_pair_df)){
+#     gene_pair_df[i, ] = sort(gene_pair_df[i, ])
+# }
+# 
+# gene_pair_df <- gene_pair_df[!duplicated(gene_pair_df),]
+
+gene_pair_df <- data.frame(
+  gene_1 = rep("Fam83h", times = length(gene_v)),
+  gene_2 = gene_v
+)
+
+gene_pair_df <- gene_pair_df %>% mutate_all(as.character)
+
+gene_pair_df <- gene_pair_df %>% 
+  unite(gene_1:gene_2, col = "gene_pair", sep = "-", remove = FALSE) %>% 
+  dplyr::select(gene_1, gene_2, gene_pair)
+
+gene_pair_df <- gene_pair_df %>% 
+  dplyr::filter(gene_2 != "Fam83h")
+
+
+# gene_pair <- c("Fam83h", "Crabp2")
+
+# gene_df_sce <- sce_mouse_stromal@assays@data$logcounts %>%
+#   t() %>%
+#   as.data.frame() %>%
+#   dplyr::select(Crabp2, Fam83h) %>%
+#   mutate(cluster = as.character(colLabels(sub_mnn_out))) %>%
+#   mutate(Fli1_pos = dplyr::if_else(condition = Fli1 > 0, true = "pos", false = "neg")) %>%
+#   mutate(Hapln1_pos = dplyr::if_else(condition = Hapln1 > 0, true = "pos", false = "neg"))
+# 
+# sce_mouse_stromal %>%
+#   group_by(cluster, Fli1_pos, Hapln1_pos) %>%
+#   tally() %>%
+#   ungroup() %>% 
+#   group_by(cluster) %>% 
+#   mutate(percentage = 100 * n/sum(n)) %>% 
+#   ungroup() %>% 
+#   mutate_at(.vars = c("percentage"), .funs = round, digits = 2) %>% 
+#   print(n = Inf)
+
+# https://stackoverflow.com/questions/46740807/dynamic-group-by-argument-based-on-a-list-r-for-loop-function
+# https://stackoverflow.com/questions/26003574/use-dynamic-variable-names-in-dplyr
+# https://stackoverflow.com/questions/60895225/dplyr-mutate-with-an-ifelse-using-dynamic-variable-names
+find_n_double_positives <- function(sce, gene_pair){
+  library(tidyverse)
+  library(rlang)
+  gene_df <- sce@assays@data$logcounts %>% 
+    t() %>% 
+    as.data.frame() %>% 
+    dplyr::select(gene_pair[1], gene_pair[2]) %>% 
+    mutate(cluster = as.character(colLabels(sce))) %>% 
+    mutate(!!paste0(gene_pair[1], "_expression") := dplyr::if_else(condition = !!sym(gene_pair[1]) > 0, true = "pos", false = "neg")) %>% 
+    mutate(!!paste0(gene_pair[2], "_expression") := dplyr::if_else(condition = !!sym(gene_pair[2]) > 0, true = "pos", false = "neg"))
+  
+  gene_df %>% 
+    group_by(cluster, !!!syms(paste0(gene_pair[1], "_expression")), !!!syms(paste0(gene_pair[2], "_expression"))) %>% 
+    tally() %>%
+    ungroup() %>% 
+    group_by(cluster) %>% 
+    mutate(percentage = 100 * n/sum(n)) %>% 
+    ungroup() %>% 
+    mutate_at(.vars = c("percentage"), .funs = round, digits = 2) %>%
+    print(n = Inf)
+  }
+
+gene_pair_v <- c("Fam83h", "Kdr")
+
+sce_mouse_stromal %>% 
+  find_n_double_positives(gene_pair = gene_pair_v) %>% 
+  dplyr::filter(cluster == "cTEC")
+
+
+# double_positive_list <- purrr::map(seq_len(nrow(gene_pair_df)), function(i) {
+# purrr::map(seq_len(nrow(gene_pair_df)), function(i) {
+# purrr::map(6612:nrow(gene_pair_df), function(i) {  
+# purrr::map(7064:nrow(gene_pair_df), function(i) {    
+purrr::map(7154:nrow(gene_pair_df), function(i) {    
+  print(i)
+  # gene_pair_dp_table <- sce_mouse_stromal %>% 
+  gene_pair_dp_table <- sce_mouse_stromal %>% 
+  find_n_double_positives(gene_pair = c(gene_pair_df$gene_1[i], gene_pair_df$gene_2[i])) 
+  
+  gene_pair_dp_table %>% qs::qsave(file = paste0(path_to_files, "gene_pair_table/", gene_pair_df$gene_1[i], "_", gene_pair_df$gene_2[i], ".qs"))
+  
+  } ) # %>% purrr::set_names(gene_pair_df$gene_pair)
+
+double_positive_qs_files <- list.files(paste0(path_to_files, "/gene_pair_table/"), full.names = TRUE)
+
+double_positive_list <- double_positive_qs_files %>% as.list() %>% purrr::map(qs::qread)
+
+double_positive_list <- double_positive_list %>% purrr::set_names(paste0(gene_pair_df$gene_1, "_", gene_pair_df$gene_2))
+
+# double_positive_list %>% qs::qsave(file = paste0(path_to_files, "double_positive_list_all_genes.qs"))
+
+# double_positive_list <- qs::qread(file = paste0(path_to_files, "double_positive_list_all_genes.qs"))
+
+double_positive_df <- double_positive_list %>%
+  purrr::map(function(x) x %>% purrr::set_names("cluster", "gene_1", "gene_2", "n", "percentage") %>%
+               dplyr::filter(gene_1 == "pos" & gene_2 == "pos") %>%
+               dplyr::select(cluster, percentage)
+  ) %>% bind_rows(.id = "gene_pair") %>%
+  arrange(desc(percentage))
+
+double_positive_df %>% 
+  purrr::set_names("gene_pair", "cell_type", "percentage") %>% 
+  arrange(cell_type, percentage) %>% 
+  # vroom::vroom_write(file = paste0(path_to_files, "sce_mouse_stromal_Fam83h_double_positives_cell_type_percentage.tsv"), delim = "\t")
+  vroom::vroom_write(file = paste0(path_to_files, "sce_mouse_stromal_Fam83h_double_positives_cell_type_percentage_sorted.tsv"), delim = "\t")
+
+sce_mouse_stromal$cell_types %>%
+  as.data.frame() %>%
+  purrr::set_names("cell_type") %>% 
+  group_by(cell_type) %>% 
+  tally() %>% 
+  arrange(desc(n)) %>% 
+  print(Inf) %>% 
+  vroom::vroom_write(file = paste0(path_to_files, "sce_mouse_stromal_n_cells_per_cell_type.tsv"), delim = "\t")
+  
+
+double_positive_df %>% split(f = .$cluster)
+
+# double_positive_df_1 <- double_positive_list_1 %>% 
+#   purrr::map(function(x) x %>% purrr::set_names("cluster", "gene_1", "gene_2", "n", "percentage") %>% 
+#                dplyr::filter(gene_1 == "pos" & gene_2 == "pos") %>% 
+#                dplyr::select(cluster, percentage)
+#   ) %>% bind_rows(.id = "gene_pair") %>% 
+#   arrange(desc(percentage))
+# 
+# double_positive_df_2 <- double_positive_list_2 %>% 
+#   purrr::map(function(x) x %>% purrr::set_names("cluster", "gene_1", "gene_2", "n", "percentage") %>% 
+#                dplyr::filter(gene_1 == "pos" & gene_2 == "pos") %>% 
+#                dplyr::select(cluster, percentage)
+#   ) %>% bind_rows(.id = "gene_pair") %>% 
+#   arrange(desc(percentage))
+
+```
+
+# Violin plots for specified genes
+```{r}
+sce_mouse_stromal <- qs::qread(paste0(path_to_files, "sce_mouse_stromal.qs"), nthreads = 6)
+
+genes <- c("Fam83h", "Notch1", "Krt8", "Krt5", "Psmb11", "Aire", "Notch3", "Cdh1", "Dll4", "Hes1", "Hey1", "Hes6", "Hmgb2")
+
+i <- 1
+for(i in 1:length(genes)) {
+  violin_plot <- sce_mouse_stromal %>%
+  plotExpression(x = "cell_types", features = genes[i],  colour_by = "cell_types") +
+  theme_bw() +
+  theme(axis.text.x = element_blank()) +
+  ggeasy::easy_all_text_size(size = 20) +
+  guides(color = guide_legend("Cell types")) +
+  labs(x = "", y = "Normalized gene expression") +
+  ggeasy::easy_legend_at(to = "bottom") 
+
+  violin_plot %>% ggsave(filename = paste0(path_to_files,  "violin_plots/", "mouse_stromal_", genes[i], "_ violin_plot.png"), width = 15, height = 7, dpi = 900)  
+}
+
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+# human_thymic_epithelial_data <- read_h5ad(file = file_human_thymic_epithelial)
+# mouse_stromal_data <- readH5AD(file = file_mouse_stromal)
+
+
+load_h5_into_sce <- function(path_to_file) {
+  library(Matrix)
+  library(rhdf5)
+  library(SingleCellExperiment)
+  library(tidyverse)
+  
+  sc_data <- path_to_file %>%
+    h5read(name = "matrix")
+
+  counts_matrix <- sparseMatrix(
+    dims = sc_data$shape,
+    i = as.numeric(sc_data$indices),
+    p = as.numeric(sc_data$indptr),
+    x = as.numeric(sc_data$data),
+    index1 = FALSE
+  )
+
+  spread_df <- counts_matrix %>%
+    summary() %>%
+    as.data.frame()
+
+  df <- spread_df %>%
+    pivot_wider(names_from = j, values_from = x) %>%
+    purrr::set_names("rowname", sc_data$barcodes)
+
+  df <- df %>%
+    inner_join(features_df) %>%
+    dplyr::select(names(features_df), everything())
+
+  df <- df %>% dplyr::select(-c("rowname", "_all_tag_keys", "feature_type", "genome", "id"))
+
+  df <- df %>%
+    remove_rownames() %>%
+    column_to_rownames("name")
+
+  df <- df %>% replace(is.na(.), 0)
+
+  counts_matrix <- df %>% as.matrix()
+
+  sce <- SingleCellExperiment(assays = list(counts = counts_matrix), colData = sc_data$barcodes)
+  
+  rowData(sce) <- rownames(df)
+  
+  return(sce)
+}
+```
+

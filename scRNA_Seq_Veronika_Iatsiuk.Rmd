@@ -1,0 +1,1131 @@
+---
+title: "scRNAseq_Veronika_Iatsiuk"
+author: "Carlos Eduardo Madureira Trufen"
+date: "5/18/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r}
+# library(DropletUtils)
+
+library(AUCell)
+library(batchelor)
+# library(beachmat)
+library(biomaRt)
+library(bluster)
+library(cluster)
+library(celldex)
+library(corral)
+library(cowplot)
+# library(clusterProfiler)
+library(clustree)
+library(DESeq2)
+library(edgeR) 
+library(factoextra)
+library(future)
+library(ggeasy)
+library(ggpubr)
+library(GSEABase)
+library(HDF5Array)
+library(limma)
+library(Matrix)
+library(mmtable2)
+library(org.Mm.eg.db)
+library(msigdbr)
+library(patchwork)
+library(PCAtools)
+library(pheatmap)
+library(qs)
+library(Rhdf5lib)
+library(rhdf5)
+library(Seurat)
+library(slingshot)
+library(scran)
+library(scater)
+library(scRNAseq)
+library(SingleCellExperiment)
+library(tidyverse)
+library(TSCAN)
+library(uwot)
+library(zellkonverter)
+```
+
+```{r}
+# path_to_files <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNA_Seq_data_Veronika_Iatsiuk/"
+path_to_files <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/scRNA_Seq_data_Veronika_Iatsiuk/"
+```
+
+# Datasets retrieved from
+# https://singlecell.broadinstitute.org/single_cell/study/SCP44/small-intestinal-epithelium
+```{r}
+metadata_Haber_df <- read_delim("~/PRIMUS/data/83_BIOINFORMATICS/Kadu/scRNA_Seq_data_Veronika_Iatsiuk/Haber_et_al_2017/atlas_metadata.txt", delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+
+tsne_pca_Haber_df <- vroom::vroom(
+  file = paste0(path_to_files, "Haber_et_al_2017/atlas_tSNE_PCA_update.txt"), 
+  delim = "\t", 
+  escape_double = FALSE, 
+  trim_ws = TRUE,
+  progress = TRUE, 
+  num_threads = 50
+  )
+
+tsne_pca_Haber_df %>% 
+  dplyr::select(X, Y) %>% 
+  dplyr::slice(-1) %>%
+  mutate_all(as.numeric) %>% 
+  ggplot(aes(x = X, y = Y)) +
+  geom_point()
+
+cell_to_use <- tsne_pca_Haber_df %>% dplyr::slice(-1) %>% pull(NAME)
+
+count_data_Haber <- vroom::vroom(
+  # file = paste0(path_to_files, "Haber_et_al_2017/regional_cell_sampling_UMIcounts.txt"),
+  # file = paste0(path_to_files, "Haber_et_al_2017/AtlasFullLength_log2TPM.txt"),
+  file = paste0(path_to_files, "Haber_et_al_2017/atlas_Log2Tpm_round2.txt"),
+  delim = "\t", 
+  escape_double = FALSE, 
+  trim_ws = TRUE,
+  progress = TRUE, 
+  num_threads = 50
+  )
+
+count_data_Haber_Cul4a <- count_data_Haber %>% 
+  # rownames_to_column(var = "Gene") %>% 
+  dplyr::filter(GENE == "Cul4a") %>% 
+  column_to_rownames(var = "GENE") %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "cell")
+
+count_data_Haber <- count_data_Haber %>% column_to_rownames(var = "GENE")
+
+column_ids <- count_data_Haber %>% colnames()
+row_ids <- count_data_Haber %>% rownames()
+
+tsne_pca_Haber_df %>% 
+  dplyr::select(X, Y) %>% 
+  dplyr::slice(-1) %>%
+  mutate_all(as.numeric) %>% 
+  mutate(Cul4a = count_data_Haber_Cul4a$Cul4a) %>% 
+  ggplot(aes(x = X, y = Y, color = Cul4a)) +
+  geom_point() +
+  scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+  theme_bw() + 
+  labs(x = "TSNE 1", y = "TSNE 2", title = "Cul4a") +
+  easy_plot_title_size(size = 20)
+
+sce_Haber <- SingleCellExperiment(assays = list(logcounts = count_data_Haber), 
+                                  colData = column_ids,
+                                  rowData = row_ids)
+rownames(sce_Haber) <- row_ids
+sce_Haber@int_colData@listData$reducedDims$TSNE <- tsne_pca_Haber_df %>% 
+  dplyr::slice(-1) %>% 
+  dplyr::select(X, Y) %>% 
+  mutate_all(as.numeric)
+
+sce_Haber@int_colData@listData$reducedDims$PCA <- tsne_pca_Haber_df %>% 
+  dplyr::slice(-1) %>% 
+  dplyr::select(PC1, PC2, PC3, PC4, PC5) %>% 
+  mutate_all(as.numeric)
+
+sce_Haber$annotation <- metadata_Haber_df %>% 
+  dplyr::filter(NAME %in% column_ids) %>% 
+  mutate(Cluster = Cluster %>% dplyr::recode("Enterocyte.Immature.Distal" = "Enterocyte.Immature",
+                                             "Enterocyte.Mature.Distal" = "Enterocyte.Mature",
+                                             "TA.G1" = "TA",
+                                             "TA.G2" = "TA")) %>% 
+  pull(Cluster)
+
+sub_sce_Haber <- sce_Haber[, sce_Haber$annotation %>% str_which(pattern = "Proximal", negate = TRUE)]
+sub_sce_Haber@int_colData$reducedDims$TSNE %>% 
+  mutate(annotation = sub_sce_Haber$annotation) %>% 
+  ggplot(aes(x = X, y = Y, colour = annotation)) +
+  geom_point(alpha = 0.4, size = 2) +
+  theme_bw() +
+  scale_color_manual(
+    values = c("#970AF6", # "Enterocyte.Immature"
+               "#F67618", # "Enterocyte.Mature"
+               "#0000FF", # "Enterocyte.Progenitor"
+               "#999999", # "Enterocyte.Progenitor.Early"
+               "#25A3AD", # "Enterocyte.Progenitor.Late"
+               "#CB0A0A", # "Enteroendocrine"
+               "#F5C530", # "Goblet"
+               "#28D556", # "Paneth"
+               "#36EEE3",  # "Stem"
+               "#EE3658",  # "TA"
+               "#8FEE36"  # "Tuft"
+               ),
+    labels = c("Enterocyte.Immature",
+               "Enterocyte.Mature",
+               "Enterocyte.Progenitor",
+               "Enterocyte.Progenitor.Early",
+               "Enterocyte.Progenitor.Late",
+               "Enteroendocrine",
+               "Goblet",
+               "Paneth",
+               "Stem",
+               "TA",
+               "Tuft"
+               )) +
+  ggeasy::easy_all_text_size(size = 20) +
+  guides(colour = guide_legend(override.aes = list(size = 5))) +
+  labs(x = "TSNE1", y = "TSNE2")
+
+tsne_pca_Haber_df %>% 
+  dplyr::slice(-1) %>%
+  mutate(annotation = sce_Haber$annotation) %>% 
+  mutate(Cul4a = count_data_Haber_Cul4a$Cul4a) %>% 
+  dplyr::filter(annotation %>% str_detect(pattern = "Proximal", negate = TRUE)) %>% 
+  dplyr::select(X, Y, Cul4a) %>% 
+  mutate_all(as.numeric) %>% 
+  ggplot(aes(x = X, y = Y, color = Cul4a)) +
+  geom_point() +
+  scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+  theme_bw() + 
+  labs(x = "TSNE 1", y = "TSNE 2", title = "Cul4a") +
+  easy_plot_title_size(size = 20) 
+
+# sub_sce_Haber %>% qs::qsave(file = paste0(path_to_files, "sub_sce_Haber.qs"), nthreads = 50)
+sub_sce_Haber <- qs::qread(file = paste0(path_to_files, "sub_sce_Haber.qs"), nthreads = 50)
+
+# sce_Haber %>% qs::qsave(file = paste0(path_to_files, "sce_Haber.qs"), nthreads = 50)
+sce_Haber <- qs::qread(file = paste0(path_to_files, "sce_Haber.qs"), nthreads = 50)
+
+sce_Haber %>% plotTSNE()
+sce_Haber %>% plotTSNE(colour_by = "annotation") + ggeasy::easy_all_text_size(size = 20)
+```
+
+
+# Dataset from
+# https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6642641/
+# https://tabula-muris.ds.czbiohub.org/
+```{r}
+metadata_Schaum_df <- read_csv("~/PRIMUS/data/83_BIOINFORMATICS/Kadu/scRNA_Seq_data_Veronika_Iatsiuk/Schaum_et_al_2019/annotations_facs.csv")
+
+count_data_Schaum <- read_csv(file = paste0(path_to_files, "Schaum_et_al_2019/Large_Intestine-counts.csv"))
+count_data_Schaum <- count_data_Schaum %>% column_to_rownames(var = "...1")
+
+col_names <- count_data_Schaum %>% colnames()
+row_ids <- count_data_Schaum %>% rownames()
+
+tsne_Schaum_df <- metadata_Schaum_df %>% 
+  dplyr::filter(cell %in% col_names) %>% 
+  dplyr::select(cell, tissue_tSNE_1, tissue_tSNE_2) %>% 
+  dplyr::rename("X" = "tissue_tSNE_1", "Y" =  "tissue_tSNE_2")
+  
+cell_to_use <- tsne_Schaum_df %>% pull(cell)
+
+count_data_Schaum <- count_data_Schaum %>% dplyr::select(cell_to_use)
+
+col_ids <- count_data_Schaum %>% colnames()
+
+# count_data_Schaum <- ount_data_Schaum %>% as.matrix()
+
+count_data_Schaum_Cul4a <- count_data_Schaum %>% 
+  rownames_to_column(var = "Gene") %>% 
+  dplyr::filter(Gene == "Cul4a") %>% 
+  column_to_rownames(var = "Gene") %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "cell")
+
+tsne_Schaum_df %>% 
+  full_join(count_data_Schaum_Cul4a) %>% 
+  mutate(Cul4a = Cul4a %>% log2()) %>% 
+  dplyr::select(-cell) %>% 
+  mutate_all(as.numeric) %>% 
+  ggplot(aes(x = X, y = Y, color = Cul4a)) +
+  geom_point() +
+  scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+  theme_bw() + 
+  labs(x = "TSNE 1", y = "TSNE 2", title = "Cul4a") +
+  easy_plot_title_size(size = 20)
+
+sce_Schaum <- SingleCellExperiment(assays = list(counts = count_data_Schaum), 
+                                   colData = col_ids,
+                                   rowData = row_ids)
+rownames(sce_Schaum) <- row_ids
+sce_Schaum@int_colData@listData$reducedDims$TSNE <- tsne_Schaum_df %>% 
+  dplyr::select(X, Y) %>% 
+  mutate_all(as.numeric)
+
+sce_Schaum <- sce_Schaum %>% scater::logNormCounts()
+
+sce_Schaum$annotation <- metadata_Schaum_df %>% 
+  dplyr::filter(cell %in% cell_to_use) %>% 
+  mutate(free_annotation = free_annotation %>% dplyr::recode("Chromaffin Cell" = "Enteroendocrine", 
+                                                             "Enterocyte (Distal)" = "Enterocyte" ,
+                                                             "Goblet cell, top of crypt (Distal)" = "Goblet",
+                                                             "Goblet cell (Distal)" = "Goblet",
+                                                             "Lgr5- amplifying undifferentiated cell" = "Stem", 
+                                                             "Lgr5- undifferentiated cell"  = "Stem", 
+                                                             "Lgr5+ amplifying undifferentiated cell (Distal)" = "Stem",
+                                                             "Lgr5+ undifferentiated cell (Distal)" = "Stem",
+                                                             "Tuft cell" = "Tuft")) %>% 
+  pull(free_annotation)
+
+sce_Schaum %>% qs::qsave(file = paste0(path_to_files, "sce_Schaum.qs"), nthreads = 5)
+sce_Schaum <- qs::qread(file = paste0(path_to_files, "sce_Schaum.qs"), nthreads = 5)
+
+
+Cul4a_Schaum_tsne_plot <- tsne_Schaum_df %>% 
+  full_join(count_data_Schaum_Cul4a) %>% 
+  mutate(Cul4a = Cul4a %>% log2()) %>% 
+  mutate(Cul4a = Cul4a %>% dplyr::if_else(condition = is.infinite(.), true = 0, false = .)) %>% 
+  mutate(annotation = sce_Schaum$annotation) %>% 
+  dplyr::filter(annotation %>% str_detect(pattern = "Proximal", negate = TRUE)) %>% 
+  dplyr::select(-cell) %>% 
+  mutate_all(as.numeric) %>% 
+  ggplot(aes(x = X, y = Y, color = Cul4a)) +
+  geom_point() +
+  scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+  theme_bw() + 
+  labs(x = "TSNE 1", y = "TSNE 2", title = "Cul4a") +
+  easy_plot_title_size(size = 20)
+
+Cul4a_Schaum_tsne_plot %>% ggsave(filename = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/scRNA_Seq_data_Veronika_Iatsiuk/Cul4a_Schaum_tsne_plot.tiff", width = 10, height = 7, dpi = 900)
+
+sub_sce_Schaum <- sce_Schaum[, sce_Schaum$annotation %>% str_which(pattern = "Proximal", negate = TRUE)]
+Schaum_tsne_plot <- sub_sce_Schaum@int_colData$reducedDims$TSNE %>% 
+  mutate(annotation = sub_sce_Schaum$annotation) %>% 
+  ggplot(aes(x = X, y = Y, colour = annotation)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  theme_bw() +
+  scale_color_manual(
+    values = c("#F67618", # Enterocyte
+               "#CB0A0A", # "Enteroendocrine"
+               "#F5C530", # "Goblet"
+               "#36EEE3",  # "Stem"
+               "#8FEE36"  # "Tuft"
+    ),
+    labels = c("Enterocyte",
+               "Enteroendocrine",
+               "Goblet",
+               "Stem",
+               "Tuft"
+               )) +
+  ggeasy::easy_all_text_size(size = 20) +
+  guides(colour = guide_legend(override.aes = list(size = 5))) +
+  labs(x = "TSNE1", y = "TSNE2")
+
+Schaum_tsne_plot %>% ggsave(filename = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/scRNA_Seq_data_Veronika_Iatsiuk/Schaum_tsne_plot.png", width = 10, height = 7, dpi = 900)
+
+Schaum_tsne_plot %>% ggsave(filename = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/scRNA_Seq_data_Veronika_Iatsiuk/Schaum_tsne_plot.tiff", width = 10, height = 7, dpi = 900)
+
+# sub_sce_Schaum %>% qs::qsave(file = paste0(path_to_files, "sub_sce_Schaum.qs"), nthreads = 5)
+sub_sce_Schaum <- qs::qread(file = paste0(path_to_files, "sub_sce_Schaum.qs"), nthreads = 5)
+
+sce_Schaum %>% plotTSNE()
+sce_Schaum %>% plotTSNE(colour_by = "annotation") + ggeasy::easy_all_text_size(size = 20)
+```
+
+
+# Dataset from 
+# https://www.cell.com/cell/fulltext/S0092-8674(18)30116-8?_returnURL=https%3A%2F%2Flinkinghub.elsevier.com%2Fretrieve%2Fpii%2FS0092867418301168%3Fshowall%3Dtrue
+# https://github.com/ggjlab/scMCA
+# data downloaded from https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE108097
+# ```{r}
+# # library(scMCA)
+# # scMCA::ref.expr %>% colnames() %>% str_subset(pattern = "intesti")
+# # [1] "Epithelium of small intestinal villi_Gm23935 high(Small-Intestine)"
+# # [2] "Epithelium of small intestinal villi_S100g high(Small-Intestine)"  
+# # [3] "Epithelium of small intestinal villi_mt-Nd1 high(Small-Intestine)" 
+# # [4] "Epithelium of small intestinal villi_Fabp1 high(Small-Intestine)"  
+# # [5] "Epithelium of small intestinal villi_Fabp6 high(Small-Intestine)"  
+# 
+# Mouse_atlas_fetal_intestine <- vroom::vroom(
+#   file = paste0(path_to_files, "Mouse_atlas/GSM2906417_FetalIntestine_dge.txt"), 
+#   col_names = FALSE, 
+#   progress = T,
+#   num_threads = 50)
+# 
+# col_names_fetal_intestine <- Mouse_atlas_fetal_intestine[1, ] %>% t() %>% as.data.frame() %>% pull(V1)
+# row_names_fetal_intestine <- Mouse_atlas_fetal_intestine %>% dplyr::slice(-1) %>% pull(X1)
+# Mouse_atlas_fetal_intestine <- Mouse_atlas_fetal_intestine %>% tidyr::separate(col = "X8658", into = c("X8658", "X8659"), sep = " ")
+# Mouse_atlas_fetal_intestine <- Mouse_atlas_fetal_intestine %>% dplyr::slice(-1) %>% dplyr::select(-X1)
+# Mouse_atlas_fetal_intestine <- Mouse_atlas_fetal_intestine %>% mutate_all(as.numeric) %>% as.matrix()
+# 
+# sce_mouse_atlas_fetal_intestine <- SingleCellExperiment(assays = list(counts = Mouse_atlas_fetal_intestine), colData = col_names_fetal_intestine)
+# rowData(sce_mouse_atlas_fetal_intestine) <- row_names_fetal_intestine
+# rownames(sce_mouse_atlas_fetal_intestine) <- row_names_fetal_intestine
+# 
+# sce_mouse_atlas_fetal_intestine %>% qs::qsave(file = paste0(path_to_files, "sce_mouse_atlas_fetal_intestine.qs"), nthreads = 50)
+# 
+# Mouse_atlas_SmallIntestine_CD45 <- vroom::vroom(
+#   file = paste0(path_to_files, "Mouse_atlas/GSM2906467_SmallIntestine.CD45_dge.txt"), 
+#   col_names = FALSE, 
+#   progress = T,
+#   num_threads = 50)
+# 
+# col_names_small_intestine_CD45 <- Mouse_atlas_SmallIntestine_CD45[1, ] %>% t() %>% as.data.frame() %>% pull(V1)
+# row_names_small_intestine_CD45 <- Mouse_atlas_SmallIntestine_CD45 %>% dplyr::slice(-1) %>% pull(X1)
+# Mouse_atlas_SmallIntestine_CD45 <- Mouse_atlas_SmallIntestine_CD45 %>% tidyr::separate(col = "X2938", into = c("X2938", "X2939"), sep = " ")
+# Mouse_atlas_SmallIntestine_CD45 <- Mouse_atlas_SmallIntestine_CD45 %>% dplyr::slice(-1) %>% dplyr::select(-X1)
+# Mouse_atlas_SmallIntestine_CD45 <- Mouse_atlas_SmallIntestine_CD45 %>% mutate_all(as.numeric) %>% as.matrix()
+# 
+# sce_mouse_atlas_small_intestine_CD45 <- SingleCellExperiment(assays = list(counts = Mouse_atlas_SmallIntestine_CD45), colData = col_names_small_intestine_CD45)
+# rowData(sce_mouse_atlas_small_intestine_CD45) <- row_names_small_intestine_CD45
+# rownames(sce_mouse_atlas_small_intestine_CD45) <- row_names_small_intestine_CD45
+# 
+# sce_mouse_atlas_small_intestine_CD45 %>% qs::qsave(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_CD45.qs"), nthreads = 50)
+# 
+# 
+# 
+# Mouse_atlas_SmallIntestine1 <- vroom::vroom(
+#   file = paste0(path_to_files, "Mouse_atlas/GSM2906468_SmallIntestine1_dge.txt"), 
+#   col_names = FALSE, 
+#   progress = T,
+#   num_threads = 50)
+# 
+# col_names_small_intestine_1 <- Mouse_atlas_SmallIntestine1[1, ] %>% t() %>% as.data.frame() %>% pull(V1)
+# row_names_small_intestine_1 <- Mouse_atlas_SmallIntestine1 %>% dplyr::slice(-1) %>% pull(X1)
+# Mouse_atlas_SmallIntestine1 <- Mouse_atlas_SmallIntestine1 %>% tidyr::separate(col = "X4764", into = c("X4764", "X4765"), sep = " ")
+# Mouse_atlas_SmallIntestine1 <- Mouse_atlas_SmallIntestine1 %>% dplyr::slice(-1) %>% dplyr::select(-X1)
+# Mouse_atlas_SmallIntestine1 <- Mouse_atlas_SmallIntestine1 %>% mutate_all(as.numeric) %>% as.matrix()
+# 
+# sce_mouse_atlas_small_intestine_1 <- SingleCellExperiment(assays = list(counts = Mouse_atlas_SmallIntestine1), colData = col_names_small_intestine_1)
+# rowData(sce_mouse_atlas_small_intestine_1) <- row_names_small_intestine_1
+# rownames(sce_mouse_atlas_small_intestine_1) <- row_names_small_intestine_1
+# 
+# sce_mouse_atlas_small_intestine_1 %>% qs::qsave(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_1.qs"), nthreads = 50)
+# 
+# Mouse_atlas_SmallIntestine2 <- vroom::vroom(
+#   file = paste0(path_to_files, "Mouse_atlas/GSM2906469_SmallIntestine2_dge.txt"), 
+#   col_names = FALSE, 
+#   progress = T,
+#   num_threads = 50)
+# 
+# col_names_small_intestine_2 <- Mouse_atlas_SmallIntestine2[1, ] %>% t() %>% as.data.frame() %>% pull(V1)
+# row_names_small_intestine_2 <- Mouse_atlas_SmallIntestine2 %>% dplyr::slice(-1) %>% pull(X1)
+# Mouse_atlas_SmallIntestine2 <- Mouse_atlas_SmallIntestine2 %>% tidyr::separate(col = "X2215", into = c("X2215", "X2216"), sep = " ")
+# Mouse_atlas_SmallIntestine2 <- Mouse_atlas_SmallIntestine2 %>% dplyr::slice(-1) %>% dplyr::select(-X1)
+# Mouse_atlas_SmallIntestine2 <- Mouse_atlas_SmallIntestine2 %>% mutate_all(as.numeric) %>% as.matrix()
+# 
+# sce_mouse_atlas_small_intestine_2 <- SingleCellExperiment(assays = list(counts = Mouse_atlas_SmallIntestine2), colData = col_names_small_intestine_2)
+# rowData(sce_mouse_atlas_small_intestine_2) <- row_names_small_intestine_2
+# rownames(sce_mouse_atlas_small_intestine_2) <- row_names_small_intestine_2
+# 
+# sce_mouse_atlas_small_intestine_2 %>% qs::qsave(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_2.qs"), nthreads = 50)
+# 
+# 
+# 
+# 
+# Mouse_atlas_SmallIntestine3 <- vroom::vroom(
+#   file = paste0(path_to_files, "Mouse_atlas/GSM2906470_SmallIntestine3_dge.txt"), 
+#   col_names = FALSE, 
+#   progress = T,
+#   num_threads = 50)
+# 
+# col_names_small_intestine_3 <- Mouse_atlas_SmallIntestine3[1, ] %>% t() %>% as.data.frame() %>% pull(V1)
+# row_names_small_intestine_3 <- Mouse_atlas_SmallIntestine3 %>% dplyr::slice(-1) %>% pull(X1)
+# Mouse_atlas_SmallIntestine3 <- Mouse_atlas_SmallIntestine3 %>% tidyr::separate(col = "X2005", into = c("X2005", "X2006"), sep = " ")
+# Mouse_atlas_SmallIntestine3 <- Mouse_atlas_SmallIntestine3 %>% dplyr::slice(-1) %>% dplyr::select(-X1)
+# Mouse_atlas_SmallIntestine3 <- Mouse_atlas_SmallIntestine3 %>% mutate_all(as.numeric) %>% as.matrix()
+# 
+# sce_mouse_atlas_small_intestine_3 <- SingleCellExperiment(assays = list(counts = Mouse_atlas_SmallIntestine3), colData = col_names_small_intestine_3)
+# rowData(sce_mouse_atlas_small_intestine_3) <- row_names_small_intestine_3
+# rownames(sce_mouse_atlas_small_intestine_3) <- row_names_small_intestine_3
+# 
+# sce_mouse_atlas_small_intestine_3 %>% qs::qsave(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_3.qs"), nthreads = 50)
+# ```
+
+# Load the saved sce files
+```{r}
+sce_Haber <- qs::qread(file = paste0(path_to_files, "sce_Haber.qs"), nthreads = 50)
+sce_Schaum <- qs::qread(file = paste0(path_to_files, "sce_Schaum.qs"), nthreads = 50)
+sce_mouse_atlas_fetal_intestine <- qs::qread(file = paste0(path_to_files, "sce_mouse_atlas_fetal_intestine.qs"), nthreads = 50)
+sce_mouse_atlas_small_intestine_CD45 <- qs::qread(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_CD45.qs"), nthreads = 50)
+sce_mouse_atlas_small_intestine_1 <- qs::qread(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_1.qs"), nthreads = 50)
+sce_mouse_atlas_small_intestine_2 <- qs::qread(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_2.qs"), nthreads = 50)
+sce_mouse_atlas_small_intestine_3 <- qs::qread(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_3.qs"), nthreads = 50)
+```
+
+# Calculate T-SNE and UMAP
+```{r}
+# set.seed(123)
+# bpparam <- BiocParallel::MulticoreParam(workers = 51)
+# sizeFactors(sce_Haber) <- scater::librarySizeFactors(sce_Haber)
+# sce_Haber <- sce_Haber %>% scater::logNormCounts(BPPARAM = bpparam)
+# sce_Haber <- sce_Haber %>% runTSNE(BPPARAM = bpparam)
+# sce_Haber <- sce_Haber %>% runUMAP(BPPARAM = bpparam)
+# sce_Haber %>% qs::qsave(file = paste0(path_to_files, "sce_Haber.qs"), nthreads = 50)
+```
+
+# Calculate T-SNE and UMAP
+```{r}
+# set.seed(123)
+# bpparam <- BiocParallel::MulticoreParam(workers = 51)
+# sizeFactors(sce_Schaum) <- scater::librarySizeFactors(sce_Schaum)
+# sce_Schaum <- sce_Schaum %>% scater::logNormCounts(BPPARAM = bpparam)
+# sce_Schaum <- sce_Schaum %>% runTSNE(BPPARAM = bpparam)
+# sce_Schaum <- sce_Schaum %>% runUMAP(BPPARAM = bpparam)
+# sce_Schaum %>% qs::qsave(file = paste0(path_to_files, "sce_Schaum.qs"), nthreads = 50)
+```
+
+```{r}
+set.seed(123)
+bpparam <- BiocParallel::MulticoreParam(workers = 51)
+sizeFactors(sce_mouse_atlas_fetal_intestine) <- scater::librarySizeFactors(sce_mouse_atlas_fetal_intestine)
+sce_mouse_atlas_fetal_intestine <- sce_mouse_atlas_fetal_intestine %>% scater::logNormCounts(BPPARAM = bpparam)
+sce_mouse_atlas_fetal_intestine <- sce_mouse_atlas_fetal_intestine %>% runTSNE(BPPARAM = bpparam)
+sce_mouse_atlas_fetal_intestine <- sce_mouse_atlas_fetal_intestine %>% runUMAP(BPPARAM = bpparam)
+sce_mouse_atlas_fetal_intestine %>% qs::qsave(file = paste0(path_to_files, "sce_mouse_atlas_fetal_intestine.qs"), nthreads = 50)
+```
+
+```{r}
+set.seed(123)
+bpparam <- BiocParallel::MulticoreParam(workers = 51)
+sizeFactors(sce_mouse_atlas_small_intestine_CD45) <- scater::librarySizeFactors(sce_mouse_atlas_small_intestine_CD45)
+sce_mouse_atlas_small_intestine_CD45 <- sce_mouse_atlas_small_intestine_CD45 %>% scater::logNormCounts(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_CD45 <- sce_mouse_atlas_small_intestine_CD45 %>% runTSNE(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_CD45 <- sce_mouse_atlas_small_intestine_CD45 %>% runUMAP(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_CD45 %>% qs::qsave(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_CD45.qs"), nthreads = 50)
+```
+
+```{r}
+set.seed(123)
+bpparam <- BiocParallel::MulticoreParam(workers = 51)
+sizeFactors(sce_mouse_atlas_small_intestine_1) <- scater::librarySizeFactors(sce_mouse_atlas_small_intestine_1)
+sce_mouse_atlas_small_intestine_1 <- sce_mouse_atlas_small_intestine_1 %>% scater::logNormCounts(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_1 <- sce_mouse_atlas_small_intestine_1 %>% runTSNE(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_1 <- sce_mouse_atlas_small_intestine_1 %>% runUMAP(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_1 %>% qs::qsave(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_1.qs"), nthreads = 50)
+```
+
+```{r}
+set.seed(123)
+bpparam <- BiocParallel::MulticoreParam(workers = 51)
+sizeFactors(sce_mouse_atlas_small_intestine_2) <- scater::librarySizeFactors(sce_mouse_atlas_small_intestine_2)
+sce_mouse_atlas_small_intestine_2 <- sce_mouse_atlas_small_intestine_2 %>% scater::logNormCounts(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_2 <- sce_mouse_atlas_small_intestine_2 %>% runTSNE(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_2 <- sce_mouse_atlas_small_intestine_2 %>% runUMAP(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_2 %>% qs::qsave(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_2.qs"), nthreads = 50)
+```
+
+
+```{r}
+set.seed(123)
+bpparam <- BiocParallel::MulticoreParam(workers = 51)
+sizeFactors(sce_mouse_atlas_small_intestine_3) <- scater::librarySizeFactors(sce_mouse_atlas_small_intestine_3)
+sce_mouse_atlas_small_intestine_3 <- sce_mouse_atlas_small_intestine_3 %>% scater::logNormCounts(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_3 <- sce_mouse_atlas_small_intestine_3 %>% runTSNE(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_3 <- sce_mouse_atlas_small_intestine_3 %>% runUMAP(BPPARAM = bpparam)
+sce_mouse_atlas_small_intestine_3 %>% qs::qsave(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_3.qs"), nthreads = 50)
+```
+
+```{r}
+sce <- sce_Schaum
+gene <- "Cul4a"
+
+gene_tsne_umap_plots <- function(gene, sce){
+  
+  tsne_df <- sce@int_colData@listData$reducedDims$TSNE %>% as.data.frame()
+  umap_df <- sce@int_colData@listData$reducedDims$UMAP %>% as.data.frame()
+  gene_expression <- sce@assays@data$logcounts[gene,] %>% as.numeric()
+
+  gene_plots <- list(
+    tsne_plot = tsne_df %>% ggplot(aes(x = V1, y = V2, color = gene_expression)) +
+      geom_point() +
+      scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+      theme_bw() + 
+      labs(x = "TSNE 1", y = "TSNE 2", title = gene),
+  
+  umap_plot = umap_df %>% ggplot(aes(x = V1, y = V2, color = gene_expression)) +
+    geom_point() +
+    scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+    theme_bw() + 
+    labs(x = "TSNE 1", y = "TSNE 2", title = gene)) %>%
+  purrr::set_names("tsne", "umap")
+
+  return(gene_plots)
+}
+```
+
+
+
+
+
+# Load the saved sce files
+```{r}
+sce_Haber <- qs::qread(file = paste0(path_to_files, "sce_Haber.qs"), nthreads = 50)
+# sce_Haber$annotation <- sce_Haber %>% colData() %>% as.data.frame() %>% pull(X) %>% str_remove(pattern = ".*\\_")
+
+sce_Schaum <- qs::qread(file = paste0(path_to_files, "sce_Schaum.qs"), nthreads = 50)
+sce_Schaum$annotation <- sce_Schaum %>% colData() %>% as.data.frame() %>% pull(X) %>% str_remove(pattern = ".*\\_")
+sce_mouse_atlas_fetal_intestine <- qs::qread(file = paste0(path_to_files, "sce_mouse_atlas_fetal_intestine.qs"), nthreads = 50)
+sce_mouse_atlas_small_intestine_CD45 <- qs::qread(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_CD45.qs"), nthreads = 50)
+sce_mouse_atlas_small_intestine_1 <- qs::qread(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_1.qs"), nthreads = 50)
+sce_mouse_atlas_small_intestine_2 <- qs::qread(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_2.qs"), nthreads = 50)
+sce_mouse_atlas_small_intestine_3 <- qs::qread(file = paste0(path_to_files, "sce_mouse_atlas_small_intestine_3.qs"), nthreads = 50)
+```
+
+
+```{r}
+sce_Haber %>% plotTSNE()
+```
+
+
+# Plot Cul4a expression for all the datasets
+```{r}
+sce_Haber %>% gene_tsne_umap_plots(gene = "Cul4a")
+sce_Schaum %>% gene_tsne_umap_plots(gene = "Cul4a")
+sce_mouse_atlas_fetal_intestine %>% gene_tsne_umap_plots(gene = "Cul4a")
+sce_mouse_atlas_small_intestine_CD45 %>% gene_tsne_umap_plots(gene = "Cul4a")
+sce_mouse_atlas_small_intestine_1 %>% gene_tsne_umap_plots(gene = "Cul4a")
+sce_mouse_atlas_small_intestine_2 %>% gene_tsne_umap_plots(gene = "Cul4a")
+sce_mouse_atlas_small_intestine_3 %>% gene_tsne_umap_plots(gene = "Cul4a")
+```
+
+### Feature selection
+# Variance of the log-counts
+```{r}
+dec_Haber_default <- sce_Haber %>% modelGeneVar()
+dec_Schaum_default <- sce_Schaum %>% modelGeneVar()
+dec_mouse_atlas_fetal_intestine_default <- sce_mouse_atlas_fetal_intestine %>% modelGeneVar()
+dec_mouse_atlas_small_intestine_CD45_default <- sce_mouse_atlas_small_intestine_CD45 %>% modelGeneVar()
+dec_mouse_atlas_small_intestine_1_default <- sce_mouse_atlas_small_intestine_1 %>% modelGeneVar()
+dec_mouse_atlas_small_intestine_2_default <- sce_mouse_atlas_small_intestine_2 %>% modelGeneVar()
+dec_mouse_atlas_small_intestine_3_default <- sce_mouse_atlas_small_intestine_3 %>% modelGeneVar()
+
+# Based on the largest metrics
+hvg_var_Haber <- dec_Haber_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+hvg_var_Schaum <- dec_Schaum_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+hvg_var_mouse_atlas_fetal_intestine <- dec_mouse_atlas_fetal_intestine_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+hvg_var_atlas_fetal_intestine <- dec_mouse_atlas_small_intestine_CD45_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+hvg_var_mouse_atlas_small_intestine_1<- dec_mouse_atlas_small_intestine_1_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+hvg_var_mouse_atlas_small_intestine_2 <- dec_mouse_atlas_small_intestine_2_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+hvg_var_mouse_atlas_small_intestine_3 <- dec_mouse_atlas_small_intestine_3_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+```
+
+
+
+Hi,
+
+3. Colon and large intestine is the same organ and in Tabula muris they have only cells from this organ. Probably they named it differently. And, unfortunately, they do not have data from small intestine. This is a reason why I asked you for help. In supplementary info for their paper there is an information about the cell type markers that they used (please see attached file page 10-11). 
+
+So, I would suggest you to compare:
+Haber et al., 2017 - Small Intestine Epithelium vs Schaum et al., 2019 - Large Intestine
+
+if this is possible of course....
+
+May I also ask you to include into presentation a color coding for particular cell type?
+
+thank you very much!
+
+Best,
+
+Veronika 
+
+
+## Merging and compparing interesting datasets - takes toooooo long
+# Haber et al., 2017 - Small Intestine Epithelium vs Schaum et al. (Tabula muris), 2019 - Large Intestine
+```{r}
+plan("multisession", workers = 51)
+
+sub_sce_Haber <- qs::qread(file = paste0(path_to_files, "sub_sce_Haber.qs"), nthreads = 50)
+sub_sce_Schaum <- qs::qread(file = paste0(path_to_files, "sub_sce_Schaum.qs"), nthreads = 50)
+
+sub_sce_Haber$batch <- c("Haber")
+sub_sce_Schaum$batch <- c("Schaum")
+
+universe <- union(rownames(sub_sce_Haber), rownames(sub_sce_Schaum))
+
+dec_Haber_default <- sub_sce_Haber %>% modelGeneVar()
+dec_Schaum_default <- sub_sce_Schaum %>% modelGeneVar()
+
+hvg_var_Haber <- dec_Haber_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+hvg_var_Schaum <- dec_Schaum_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+
+
+## Quick start
+#  The first and most obvious is to subset all batches to the common “universe” of features.
+# universe <- union(hvg_var_Haber, hvg_var_Schaum)
+
+
+# sub_sce_Haber_sub <- sub_sce_Haber@assays@data$counts[rownames(sub_sce_Haber@assays@data$counts) %in% universe, ]
+sub_sce_Haber_sub <- sub_sce_Haber[rownames(sub_sce_Haber@assays@data$counts) %in% universe, ]
+colnames(sub_sce_Haber_sub) <- colData(sub_sce_Haber) %>% as.data.frame() %>% pull(X)
+# sub_sce_Schaum_sub <- sub_sce_Schaum@assays@data$counts[rownames(sub_sce_Schaum@assays@data$counts) %in% universe, ]
+sub_sce_Schaum_sub <- sub_sce_Schaum[rownames(sub_sce_Schaum@assays@data$counts) %in% universe, ]
+colnames(sub_sce_Schaum_sub) <- colData(sub_sce_Schaum) %>% as.data.frame() %>% pull(X)
+
+merged_Haber_Schaum <- merge(sub_sce_Haber_sub@assays@data$counts, sub_sce_Schaum_sub@assays@data$counts, by = "row.names", all = TRUE)
+
+merged_Haber_Schaum <- merged_Haber_Schaum %>% 
+  column_to_rownames(var = "Row.names") 
+
+merged_Haber_Schaum <- merged_Haber_Schaum %>%
+  mutate(across(everything(), ~replace_na(.x, 0)))
+
+sub_sce_Haber_Schaum <- SingleCellExperiment(assays = list(counts = merged_Haber_Schaum), colData = colnames(merged_Haber_Schaum)) 
+rowData(sub_sce_Haber_Schaum) <- rownames(merged_Haber_Schaum)
+
+merge_sparse <- function(...) {
+  
+  cnnew <- character()
+  rnnew <- character()
+  x <- vector()
+  i <- numeric()
+  j <- numeric()
+  
+  for (M in list(...)) {
+  
+  cnold <- colnames(M)
+  rnold <- rownames(M)
+  
+  cnnew <- union(cnnew,cnold)
+  rnnew <- union(rnnew,rnold)
+  
+  cindnew <- match(cnold,cnnew)
+  rindnew <- match(rnold,rnnew)
+  ind <- unname(which(M != 0,arr.ind=T))
+  i <- c(i,rindnew[ind[,1]])
+  j <- c(j,cindnew[ind[,2]])
+  x <- c(x,M@x)
+  }
+  
+  sparseMatrix(i=i,j=j,x=x,dims=c(length(rnnew),length(cnnew)),dimnames=list(rnnew,cnnew))
+}
+
+empty_matrix_Haber <- matrix(0, 
+  # nrow = length(union(rownames(sub_sce_Haber), rownames(sub_sce_Schaum))), 
+  nrow = length(universe), 
+  ncol = ncol(sub_sce_Haber)
+  ) %>% 
+  as.data.frame() %>% 
+  mutate(genes = universe) %>% 
+  column_to_rownames(var = "genes") %>%
+  purrr::set_names(colData(sub_sce_Haber)[, "X"]) %>%
+  as.matrix(.) %>%
+  Matrix(., sparse = T)
+
+merged_Haber <- merge_sparse(sub_sce_Haber@assays@data$logcounts %>% 
+                             as.data.frame() %>% 
+                             rownames_to_column(var = "genes") %>% 
+                             dplyr::filter(genes %in% universe) %>% 
+                             column_to_rownames(var = "genes") %>% 
+                             purrr::set_names(colData(sub_sce_Haber)[, "X"]) %>% 
+                             as.matrix(.) %>%
+                             Matrix(., sparse = T), 
+                           empty_matrix_Haber)
+
+sub_sce_Haber_merged <- SingleCellExperiment(assays = list(logcounts = merged_Haber), colData = sub_sce_Haber@colData) 
+
+sub_sce_Haber_merged <- sub_sce_Haber_merged[order(row.names(sub_sce_Haber_merged)), ]
+
+# sub_sce_Haber_merged <- sub_sce_Haber_merged %>% logNormCounts()
+
+empty_matrix_Schaum <- matrix(0, 
+  # nrow = length(union(rownames(sub_sce_Haber), rownames(sub_sce_Schaum))), 
+  nrow = length(universe), 
+  ncol = ncol(sub_sce_Schaum)
+  ) %>% 
+  as.data.frame() %>% 
+  mutate(genes = universe) %>% 
+  column_to_rownames(var = "genes") %>%
+  purrr::set_names(colData(sub_sce_Schaum)[, "X"]) %>%
+  as.matrix(.) %>%
+  Matrix(., sparse = T)
+
+merged_Schaum <- merge_sparse(sub_sce_Schaum@assays@data$counts %>% 
+                             as.data.frame() %>% 
+                             rownames_to_column(var = "genes") %>% 
+                             dplyr::filter(genes %in% universe) %>% 
+                             column_to_rownames(var = "genes") %>% 
+                             purrr::set_names(colData(sub_sce_Schaum)[, "X"]) %>% 
+                             as.matrix(.) %>%
+                             Matrix(., sparse = T), 
+                           empty_matrix_Schaum)
+
+sub_sce_Schaum_merged <- SingleCellExperiment(assays = list(counts = merged_Schaum), colData = sub_sce_Schaum@colData) 
+
+sub_sce_Schaum_merged <- sub_sce_Schaum_merged[order(row.names(sub_sce_Schaum_merged)), ]
+
+sub_sce_Schaum_merged <- sub_sce_Schaum_merged %>% logNormCounts()
+
+
+merged_Haber_Schaum <- merge(sub_sce_Haber_merged@assays@data$logcounts, sub_sce_Schaum_merged@assays@data$logcounts, by = "row.names", all = TRUE)
+merged_Haber_Schaum <- merged_Haber_Schaum %>% column_to_rownames("Row.names")
+
+# Remove batch effect
+uncorrected <- SingleCellExperiment(
+  assays = list(logcounts = merged_Haber_Schaum), 
+  colData = SummarizedExperiment::rbind(colData(sub_sce_Haber_merged), colData(sub_sce_Schaum_merged) %>% as.data.frame() %>% dplyr::select(-sizeFactor) %>% as("DFrame"))
+  ) 
+uncorrected$batch <- c(rep("Haber", ncol(sub_sce_Haber_merged)), rep("Schaum", ncol(sub_sce_Schaum_merged)))
+# colLabels(uncorrected) <- colLabels(uncorrected) %>% forcats::fct_drop()
+# uncorrected <- uncorrected %>% logNormCounts()
+
+
+# # Using RandomParam() as it is more efficient for file-backed matrices.
+bpparam <- BiocParallel::MulticoreParam(workers = 51)
+set.seed(123)
+library(tictoc)
+tic()
+uncorrected <- uncorrected %>% 
+  scater::runPCA(BSPARAM = BiocSingular::RandomParam(),
+                 # BPPARAM = bpparam,
+                 exprs_values = "logcounts"
+                 )
+toc()
+
+pcs <- uncorrected %>% reducedDim()
+choices <- pcs %>% getClusteredPCs()
+val <- metadata(choices)$chosen
+reducedDim(uncorrected, "PCA_clust") <- pcs[, 1:val]
+
+set.seed(123)
+uncorrected <- uncorrected %>% runTSNE(dimred = "PCA_clust")
+uncorrected %>% plotTSNE(colour_by = "batch")
+uncorrected %>% plotTSNE(colour_by = "annotation")
+
+set.seed(123)
+uncorrected <- uncorrected %>% runUMAP(dimred = "PCA_clust")
+uncorrected %>% plotUMAP(colour_by = "batch")
+
+uncorrected %>% qs::qsave(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/uncorrected_Haber_Schaum.qs", nthreads = 50)
+uncorrected <- qs::qread(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/uncorrected_Haber_Schaum.qs", nthreads = 50)
+
+
+
+## Performing MNN correction
+set.seed(123)
+mnn_out <- fastMNN(sub_sce_Haber_merged, sub_sce_Schaum_merged, d = 50, k = 20, BSPARAM = BiocSingular::RandomParam(deferred = TRUE))
+mnn_out$batch <- mnn_out$batch %>% as.factor() %>% forcats::fct_recode(`Haber` = "1", `Schaum` = "2") 
+
+# cluster the PCs
+pcs <- mnn_out %>% reducedDim()
+choices <- pcs %>% getClusteredPCs()
+val <- metadata(choices)$chosen
+reducedDim(mnn_out, "PCA_clust") <- pcs[, 1:val]
+
+set.seed(123)
+mnn_out <- mnn_out %>% runTSNE(dimred = "corrected")
+set.seed(123)
+mnn_out <- mnn_out %>% runUMAP(dimred = "corrected")
+
+mnn_out$batch <- factor(mnn_out$batch)
+mnn_out$annotation <- factor(uncorrected$annotation)
+
+mnn_out %>% qs::qsave(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/mnn_out_Haber_Schaum.qs", nthreads = 50)
+mnn_out <- qs::qread(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/mnn_out_Haber_Schaum.qs", nthreads = 50)
+
+mnn_out$annotation <- c(sub_sce_Haber$annotation, sub_sce_Schaum$annotation)
+
+
+mnn_out@int_colData$reducedDims$TSNE %>% 
+  as.data.frame() %>% 
+  purrr::set_names("X", "Y") %>% 
+  mutate(annotation = mnn_out$annotation) %>% 
+  ggplot(aes(x = X, y = Y, colour = annotation)) + 
+  geom_point(alpha = 0.4, size = 1.5) +
+  theme_bw() +
+  # scale_color_manual(
+  #   values = c("#970AF6", # "Enterocyte.Immature"
+  #              "#F67618", # "Enterocyte.Mature"
+  #              "#0000FF", # "Enterocyte.Progenitor"
+  #              "#999999", # "Enterocyte.Progenitor.Early"
+  #              "#25A3AD", # "Enterocyte.Progenitor.Late"
+  #              "#F67617", # "Enterocyte"
+  #              "#CB0A0A", # "Enteroendocrine"
+  #              "#F5C530", # "Goblet"
+  #              "#28D556", # "Paneth"
+  #              "#36EEE3", # "Stem"
+  #              "#8FEE36"  # "Tuft"
+  #   ),
+  #   labels = c("Enterocyte.Immature",
+  #              "Enterocyte.Mature",
+  #              "Enterocyte.Progenitor",
+  #              "Enterocyte.Progenitor.Early",
+  #              "Enterocyte.Progenitor.Late",
+  #              "Enterocyte",
+  #              "Enteroendocrine",
+  #              "Goblet",
+  #              "Paneth",
+  #              "Stem",
+  #              "TA",
+  #              "Tuft"
+  #              )) +
+  ggeasy::easy_all_text_size(size = 20) +
+  guides(colour = guide_legend(override.aes = list(size = 5))) +
+  labs(x = "TSNE1", y = "TSNE2")
+
+# Cul4a expression from reconstructed data in mnn output  
+mnn_out@int_colData$reducedDims$TSNE %>% 
+  as.data.frame() %>% 
+  purrr::set_names("X", "Y") %>% 
+  mutate(annotation = mnn_out$annotation) %>% 
+  mutate(Cul4a = mnn_out@assays@data$reconstructed["Cul4a", ] %>% as.numeric()) %>% 
+  mutate(Cul4a = Cul4a %>% dplyr::if_else(condition = . < 0,true = 0, false = .)) %>% 
+  ggplot(aes(x = X, y = Y, colour = Cul4a)) + 
+  geom_point(alpha = 0.4, size = 1.5) +
+  scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+  theme_bw() +
+  ggeasy::easy_all_text_size(size = 20) +
+  guides(colour = guide_legend(override.aes = list(size = 5))) +
+  labs(x = "TSNE1", y = "TSNE2")
+
+mnn_out %>% plotTSNE(colour_by = "annotation")
+tsne_corrected <- mnn_out %>% plotTSNE(colour_by = "batch")
+umap_corrected <- mnn_out %>% plotUMAP(colour_by = "batch")
+tsne_uncorrected <- uncorrected %>% plotTSNE(colour_by = "batch")
+umap_uncorrected <- uncorrected %>% plotUMAP(colour_by = "batch")
+
+mnn_out %>% plotTSNE(colour_by = "annotation")
+
+plot_grid(tsne_uncorrected, tsne_corrected, umap_uncorrected, umap_corrected, ncol = 2)
+
+plot_grid(tsne_uncorrected, tsne_corrected, ncol = 2)
+```
+
+```{r}
+uncorrected <- qs::qread(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/uncorrected_Haber_Schaum.qs", nthreads = 50)
+mnn_out <- qs::qread(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/mnn_out_Haber_Schaum.qs", nthreads = 50)
+
+batch_corrected_sce <- mnn_out
+uncorrected_sce <- uncorrected
+gene <- "Cul4a"
+
+library(ggnewscale)
+
+p <- ggplot() +
+       geom_point(data=dat1, aes(x=p.value, y=log2, color=p.value), shape=21, size=3) +
+       scale_color_gradient(low="red", high="gray50") +
+       new_scale_color() +
+       geom_point(data= dat2, aes(x=p.value, y=log2, shape=shp, fill=p.value), shape=21, size=2) +
+       scale_fill_gradient(low="gray90", high="blue")
+
+gene_tsne_plots <- function(gene, uncorrected_sce, batch_corrected_sce){
+  
+  tsne_df <- batch_corrected_sce@int_colData@listData$reducedDims$TSNE %>% as.data.frame()
+  gene_expression_df <- data.frame(gene_expression = uncorrected_sce@assays@data$logcounts[gene,] %>% as.numeric(),
+                                   batch = batch_corrected_sce$batch)
+  tsne_df <- tsne_df %>% bind_cols(gene_expression_df)
+
+  gene_plots <- tsne_df %>% ggplot() +
+    # geom_point(data = tsne_df_list[[1]], aes(x = V1, y = V2, color = gene_expression), shape = 21, size = 3) +
+      geom_point(data = tsne_df, aes(x = V1, y = V2, color = gene_expression)) +
+      scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+      new_scale_color() +
+      # geom_point(data = tsne_df_list[[2]], aes(x = V1, y = V2, shape = 2, fill = gene_expression), shape = 21, size = 2) +
+      geom_point(data = tsne_df, aes(x = V1, y = V2, fill = gene_expression)) +
+      scale_color_continuous(low = "grey", high = "blue", guide = "colourbar", aesthetics = "colour") +
+      theme_bw() + 
+      labs(x = "TSNE 1", y = "TSNE 2", title = gene) 
+  return(gene_plots)
+}
+
+Cul4a_tsne_umap_plots <- gene_tsne_plots_2(gene = "Cul4a", uncorrected_sce = uncorrected, batch_corrected_sce = mnn_out)
+
+cowplot::plot_grid(Cul4a_tsne_umap_plots$tsne, Cul4a_tsne_umap_plots$umap)
+```
+
+
+
+```{r}
+uncorrected <- qs::qread(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/uncorrected_Haber_Schaum.qs", nthreads = 50)
+mnn_out <- qs::qread(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/mnn_out_Haber_Schaum.qs", nthreads = 50)
+
+sce_Haber <- qs::qread(file = paste0(path_to_files, "sce_Haber.qs"), nthreads = 50)
+sce_Schaum <- qs::qread(file = paste0(path_to_files, "sce_Schaum.qs"), nthreads = 50)
+
+sce <- sce_Schaum
+gene <- "Cul4a"
+
+batch_corrected_sce <- mnn_out
+uncorrected_sce <- uncorrected
+gene <- "Cul4a"
+
+gene_tsne_plots <- function(gene, sce){
+  
+  tsne_df <- sce@int_colData@listData$reducedDims$TSNE %>% as.data.frame() %>% purrr::set_names("V1", "V2")
+  gene_expression <- sce@assays@data$logcounts[gene,] %>% as.numeric()
+
+  tsne_plot <- tsne_df %>% 
+    ggplot(aes(x = V1, y = V2, color = gene_expression)) +
+    geom_point() +
+    scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour", limits = c(0, 10)) +
+    theme_bw() + 
+    labs(x = "TSNE 1", y = "TSNE 2", title = gene)
+
+  return(tsne_plot)
+}
+
+gene_tsne_plots_2 <- function(gene, uncorrected_sce, batch_corrected_sce){
+  
+  tsne_df <- batch_corrected_sce@int_colData@listData$reducedDims$TSNE %>% as.data.frame() %>% purrr::set_names("V1", "V2")
+  gene_expression_df <- data.frame(
+    # gene_expression = batch_corrected_sce@assays@data$reconstructed[gene,] %>% as.numeric(),
+    gene_expression = uncorrected_sce@assays@data$logcounts[gene,] %>% as.numeric(),
+    batch = batch_corrected_sce$batch
+    )
+  tsne_df <- tsne_df %>% bind_cols(gene_expression_df)
+
+  gene_plots <- tsne_df %>% 
+    ggplot() +
+      geom_point(data = tsne_df, aes(x = V1, y = V2, color = gene_expression)) +
+      scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour", limits = c(0, 10)) +
+      theme_bw() + 
+      labs(x = "TSNE 1", y = "TSNE 2", title = gene) 
+  return(gene_plots)
+}
+```
+
+
+# t-SNE figures with annotation
+```{r}
+sce_Haber <- qs::qread(file = paste0(path_to_files, "sce_Haber.qs"), nthreads = 50)
+sce_Schaum <- qs::qread(file = paste0(path_to_files, "sce_Schaum.qs"), nthreads = 50)
+uncorrected <- qs::qread(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/uncorrected_Haber_Schaum.qs", nthreads = 50)
+mnn_out <- qs::qread(file = "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/mnn_out_Haber_Schaum.qs", nthreads = 50)
+
+annot_tsne_Haber <- sce_Haber %>% 
+  plotTSNE(colour_by = "annotation") +
+      scale_color_manual(
+    values = c("#7090CF",
+               "#6BDBD7",
+               "#E3DA61",
+               "#D5DED8",
+               "#D99298",
+               "#DC92D8",
+               "#7F897E",
+               "#993FE7",
+               "#A0C673",
+               "#E2D49B",
+               "#D7884A",
+               "#D8C0E1",
+               "#DB57D1",
+               "#7BE960",
+               "#6AE29C"
+               ),
+    labels = c("Enterocyte.Immature.Distal",
+               "Tuft",
+               "Goblet",
+               "Enteroendocrine",
+               "Stem",
+               "TA",
+               "Enterocyte.Mature.Proximal",
+               "TA.G1",
+               "TA.G2",
+               "Enterocyte.Progenitor.Early",
+               "Enterocyte.Progenitor.Late",
+               "Enterocyte.Immature.Proximal",
+               "Paneth",
+               "Enterocyte.Progenitor",
+               "Enterocyte.Mature.Distal"
+               ))
+
+annot_tsne_Schaum <- sce_Schaum %>% 
+  plotTSNE(colour_by = "annotation") +
+      scale_color_manual(
+    values = c("#B0E8C1",
+               "#74BDD8",
+               "#C5EA3A",
+               "#8170D4",
+               "#E85175"
+               ),
+    labels = c("epithelial cell of large intestine",
+               "large intestine goblet cell",
+               "Brush cell of epithelium proper of large intestine",
+               "enterocyte of epithelium of large intestine",
+               "enteroendocrine cell"
+               ))
+
+annot_tsne_mnn <- mnn_out %>%
+  plotTSNE(colour_by = "annotation") +
+    scale_color_manual(
+    values = c("#7090CF",
+               "#6BDBD7",
+               "#E3DA61",
+               "#D5DED8",
+               "#D99298",
+               "#DC92D8",
+               "#7F897E",
+               "#993FE7",
+               "#A0C673",
+               "#E2D49B",
+               "#D7884A",
+               "#D8C0E1",
+               "#DB57D1",
+               "#7BE960",
+               "#6AE29C",
+               "#B0E8C1",
+               "#74BDD8",
+               "#C5EA3A",
+               "#8170D4",
+               "#E85175"
+               ),
+    labels = c("Enterocyte.Immature.Distal",
+               "Tuft",
+               "Goblet",
+               "Enteroendocrine",
+               "Stem",
+               "TA",
+               "Enterocyte.Mature.Proximal",
+               "TA.G1",
+               "TA.G2",
+               "Enterocyte.Progenitor.Early",
+               "Enterocyte.Progenitor.Late",
+               "Enterocyte.Immature.Proximal",
+               "Paneth",
+               "Enterocyte.Progenitor",
+               "Enterocyte.Mature.Distal",
+               "epithelial cell of large intestine",
+               "large intestine goblet cell",
+               "Brush cell of epithelium proper of large intestine",
+               "enterocyte of epithelium of large intestine",
+               "enteroendocrine cell"
+               ))
+
+legend_mnn <- get_legend(
+  annot_tsne_mnn + 
+    guides(color = guide_legend(nrow = 4, override.aes = list(size = 2))) +
+    theme(legend.position = "bottom")
+  )
+
+plot_grid(
+  annot_tsne_Haber + theme(legend.position="none"), 
+  annot_tsne_Schaum + theme(legend.position="none"), 
+  annot_tsne_mnn + theme(legend.position="none"), 
+  legend_mnn,
+  ncol = 1, 
+  rel_heights = c(1, 1, 1, 0.1)
+  ) 
+
+
+Cul4a_expr_tsne_Haber <- gene_tsne_plots(gene = "Cul4a", sce = sce_Haber)
+Cul4a_expr_tsne_Schaum <- gene_tsne_plots(gene = "Cul4a", sce = sce_Schaum)
+Cul4a_expr_tsne_mnn <- gene_tsne_plots_2(gene = "Cul4a", uncorrected_sce = uncorrected, batch_corrected_sce = mnn_out)
+
+legend_Clu4a <- get_legend(
+  Cul4a_expr_tsne_mnn + 
+    # guides(color = guide_legend(nrow = 4, override.aes = list(size = 2))) +
+    theme(legend.position = "bottom")
+  )
+
+plot_grid(
+  annot_tsne_Haber + theme(legend.position = "none"), Cul4a_expr_tsne_Haber + theme(legend.position = "none"),
+  annot_tsne_Schaum + theme(legend.position = "none"), Cul4a_expr_tsne_Schaum + theme(legend.position = "none"),
+  annot_tsne_mnn + theme(legend.position = "none"), Cul4a_expr_tsne_mnn + theme(legend.position = "none"),
+  legend_mnn, legend_Clu4a,
+  ncol = 2, 
+  rel_heights = c(1, 1, 1, 1, 1, 1, 0.1, 0.1)
+  )
+
+# cowplot::plot_grid(
+#   annot_tsne_Haber, Cul4a_expr_tsne_Haber,
+#   annot_tsne_Schaum, Cul4a_expr_tsne_Schaum,
+#   annot_tsne_mnn, Cul4a_expr_tsne_mnn, 
+#   ncol = 2
+#   )
+```
+
+
+

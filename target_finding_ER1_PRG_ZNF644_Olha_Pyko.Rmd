@@ -1,0 +1,209 @@
+---
+title: "target_finding_ER1_PRG_ZNF644_Olha_Pyko"
+author: "Carlos Eduardo Madureira Trufen"
+date: "2023-10-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load packages
+```{r}
+library(tidyverse)
+library(VennDiagram)
+
+path_to_data <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/"
+path_to_files <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/target_finding_Olha_Pyko"
+```
+
+# Load files
+```{r}
+PGR_df <- vroom::vroom(file = paste0(path_to_data, "motif_PRG_Olha_Pyko/human_PRG_motif_df_with_overlap_nearest_neighbor.tsv"), delim = "\t", num_threads = 50)
+ZNF_simple_df <- vroom::vroom(file = paste0(path_to_data, "motif_ZNF644_12nt_Olha_Pyko/human_ZNF_simple_motif_df_with_overlap_nearest_neighbor.tsv"), delim = "\t", num_threads = 50)
+ER1_df <- vroom::vroom(file = paste0(path_to_data, "motif_ER1_Olha_Pyko/human_ER1_motif_data_overlaps_nearest_neighbours.tsv"), delim = "\t")
+ZNF_complex_df <- vroom::vroom(file = paste0(path_to_data, "PMW_Olha_Pyko/human_ZNF644_motif_df_with_overlap_nearest_neighbor.tsv"), delim = "\t", num_threads = 50)
+WIZ_simple_df <- vroom::vroom(file = paste0(path_to_data, "motif_WIZ_Olha_Pyko/human_WIZ_motif_df_with_overlap_nearest_neighbor.tsv"), delim = "\t", num_threads = 50)
+
+PGR_df <- PGR_df %>% mutate(chr = chr %>% str_remove(pattern = "_PGR"))
+ZNF_simple_df <- ZNF_simple_df %>% mutate(chr = chr %>% str_remove(pattern = "_ZNF644_simple"))
+ZNF_simple_df <- ZNF_simple_df %>% mutate(chr_nt = chr %>% paste0("_ZNF644_nt_12"))
+ER1_df <- ER1_df %>% mutate(chr = chromosome)
+# ZNF_complex_df <- ZNF_complex_df %>% mutate(chr = chr_nt %>% str_remove(pattern = "_ZNF644.*"))
+WIZ_simple_df <- WIZ_simple_df %>% mutate(chr = chr %>% str_remove(pattern = "_WIZ.*"))
+
+PGR_df <- PGR_df %>% group_by(chr) %>% mutate(FDR = `p-value` %>% p.adjust())
+ZNF_simple_df <- ZNF_simple_df %>% group_by(chr) %>% mutate(FDR = `p-value` %>% p.adjust())
+ER1_df <- ER1_df %>% group_by(chromosome) %>% mutate(FDR = `p-value` %>% p.adjust())
+ZNF_complex_df <- ZNF_complex_df %>% group_by(chr_nt) %>% mutate(FDR = `p-value` %>% p.adjust())
+WIZ_simple_df <- WIZ_simple_df %>% group_by(chr) %>% mutate(FDR = `p-value` %>% p.adjust())
+
+# PGR_df %>% vroom::vroom_write(file = "~/PRIMUS/data/18_lab/Olha/human_PGR_motif_df_with_overlap_nearest_neighbor.tsv", delim = "\t", num_threads = 50)
+# ZNF_simple_df %>% vroom::vroom_write(file = "~/PRIMUS/data/18_lab/Olha/human_ZNF_simple_motif_df_with_overlap_nearest_neighbor.tsv", delim = "\t", num_threads = 50)
+# ER1_df %>% vroom::vroom_write(file = "~/PRIMUS/data/18_lab/Olha/human_ER1_motif_data_overlaps_nearest_neighbours.tsv", delim = "\t")
+# ZNF_complex_df %>% vroom::vroom_write(file = "~/PRIMUS/data/18_lab/Olha/human_ZNF644_motif_df_with_overlap_nearest_neighbor.tsv", delim = "\t", num_threads = 50)
+# WIZ_simple_df %>% vroom::vroom_write(file = "~/PRIMUS/data/18_lab/Olha/human_WIZ_motif_df_with_overlap_nearest_neighbor.tsv", delim = "\t", num_threads = 50)
+
+```
+
+```{r}
+intersect(ER1_df$nearest_gene %>% unique(), ZNF_simple_df$nearest_gene %>% unique())
+
+fdr_threshold <- 0.05
+
+ER1_df_filtered <- ER1_df %>% dplyr::filter(FDR < fdr_threshold)
+ZNF_simple_df_filtered <- ZNF_simple_df %>% dplyr::filter(FDR < fdr_threshold)
+PGR_df_filtered <- PGR_df %>% dplyr::filter(FDR < fdr_threshold)
+ZNF_complex_df_filtered <- ZNF_complex_df %>% dplyr::filter(FDR < fdr_threshold)
+WIZ_simple_df_filtered <- WIZ_simple_df %>% dplyr::filter(FDR < fdr_threshold)
+
+ER1_filtered_list <- ER1_df_filtered %>% split(f = .$chr)
+ZNF_simple_filtered_list <- ZNF_simple_df_filtered %>% split(f = .$chr)
+PGR_filtered_list <- PGR_df_filtered %>% split(f = .$chr)
+ZNF_complex_filtered_list <- ZNF_complex_df_filtered %>% split(f = .$chr)
+WIZ_simple_filtered_list <- WIZ_simple_df_filtered %>% split(f = .$chr)
+
+chr_names <- names(ER1_filtered_list)
+
+# ZNF644_simple vs WIZ_simple
+ZNF644_simple_WIZ_simple_intersect_list <- purrr::map(seq_along(chr_names), function(i) {
+  intersect(WIZ_simple_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique(), 
+            ZNF_simple_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique())
+}) %>% purrr::set_names(chr_names)
+
+# ZNF644_simple vs ER1
+ZNF644_simple_ER1_intersect_list <- purrr::map(seq_along(chr_names), function(i) {
+  intersect(ER1_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique(), 
+            ZNF_simple_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique())
+}) %>% purrr::set_names(chr_names)
+
+# ZNF644_simple vs PGR
+ZHF644_simple_PGR_intersect_list <- purrr::map(seq_along(chr_names), function(i) {
+  intersect(WIZ_simple_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique(), 
+            PGR_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique())
+}) %>% purrr::set_names(chr_names)
+
+# ZNF644_simple vs PGR vs ER1
+ZNF644_simple_PRG_ER1_intersect_list <- purrr::map(seq_along(chr_names), function(i) {
+  intersect(PGR_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique(), 
+                      intersect(ER1_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique(), 
+                                ZNF_simple_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique()))
+}) %>% purrr::set_names(chr_names)
+
+# ZNF644_simple vs ER1 vs WIZ_simple
+ZNF644_simple_ER1_WIZ_simple_intersect_list <- purrr::map(seq_along(chr_names), function(i) {
+  intersect(ZNF_simple_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique(), 
+                      intersect(ER1_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique(), 
+                                ZNF_simple_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique()))
+}) %>% purrr::set_names(chr_names)
+
+ZNF644_simple_ER1_WIZ_simple_intersect_list <- ZNF644_simple_ER1_WIZ_simple_intersect_list %>% purrr::map(sort)
+
+# ZNF644_simple vs ZNF644_complex
+chr_1_ZNF644_nt_list <- ZNF_complex_filtered_list$chr_1 %>% split(f = .$chr_nt)
+intersect(chr_1_ZNF644_nt_list$chr_1_ZNF644_nt_41$overlaps %>% purrr::discard(is.na) %>% unique(),
+          chr_1_ZNF644_nt_list$chr_1_ZNF644_nt_42$overlaps %>% purrr::discard(is.na) %>% unique())
+
+```
+
+```{r}
+DE_results <- read_csv("~/PRIMUS/data/83_BIOINFORMATICS/Frantisek/rna_seq/20190228_Szczerkowska-121327207/tables/table_UT_KOvsWT_padj_sorted.csv")
+DEG_list <- DE_results %>% 
+  dplyr::filter(abs(log2FoldChange) > 1) %>% 
+  dplyr::filter(padj < 0.05) %>% 
+  pull(gene_name) %>% 
+  sort() %>% 
+  str_to_upper()
+
+ZNF644_simple_ER1_intersect_list <- ZNF644_simple_ER1_intersect_list %>% purrr::map(str_split, pattern = ", ") %>% purrr::map(function(x) x %>% unlist())
+
+  
+purrr::map(seq_along(ZNF644_simple_ER1_intersect_list), function(i)
+  intersect(ZNF644_simple_ER1_intersect_list[[i]], DEG_list)
+) %>% purrr::set_names(names(ZNF644_simple_ER1_intersect_list))
+```
+
+# Intersection ZNF complex vs ZNF simple, by nt and chr
+```{r}
+# ZNF644_simple_ZNF_complex_intersect_list <- purrr::map(seq_along(chr_names), function(i) {
+#   intersect(ZNF_simple_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique(), 
+#             ZNF_complex_filtered_list[[i]]$overlaps %>% purrr::discard(is.na) %>% unique())
+# }) %>% purrr::set_names(chr_names)
+
+# ZNF644_simple_ZNF_complex_intersect_list %>% qs::qsave(paste0(path_to_files, "ZNF644_simple_ZNF_complex_intersect_list.qs"), nthreads = 50)
+ZNF_simple_df <- ZNF_simple_df %>% dplyr::select(chr, chr_nt, everything())
+ZNF_complex_df <- ZNF_complex_df %>% dplyr::select(chr, chr_nt, everything())
+
+ZNF_complex_df <- ZNF_complex_df %>%
+  bind_rows(ZNF_simple_df)
+
+ZNF_complex_df %>% qs::qsave(paste0(path_to_files, "/ZNF_simple_and_complex_df.qs"), nthreads = 50)
+ZNF_complex_df <- qs::qread(paste0(path_to_files, "/ZNF_simple_and_complex_df.qs"), nthreads = 50)
+
+fdr_threshold <- 0.05
+ZNF_complex_df_filtered <- ZNF_complex_df %>% dplyr::filter(FDR < fdr_threshold)  
+
+ZNF_complex_filtered_list <- ZNF_complex_df_filtered %>% split(f = .$chr)
+
+ZNF_chr_1_list <- ZNF_complex_filtered_list$chr_1 %>% 
+  split(f = .$chr_nt) %>% 
+  purrr::map(pull, overlaps) %>% 
+  purrr::map(purrr::discard, is.na) %>% 
+  purrr::map(unique) %>% 
+  purrr::map(sort)
+
+intersect(ZNF_chr_1_list$chr_1_ZNF644_nt_41, ZNF_chr_1_list$chr_1_ZNF644_nt_42)
+
+ZNF_chr_1_intersect_df <- data.frame()
+
+nt_len_v <- ZNF_chr_1_list %>% names() %>% str_remove(pattern = "chr_1_ZNF644_")
+ZNF_chr_1_list <- ZNF_chr_1_list %>% purrr::set_names(nt_len_v)
+
+nt_df <- replicate(n = 2, expr = nt_len_v) %>% 
+  data.frame() %>% 
+  expand.grid() %>% 
+  purrr::set_names("nt_len_1", "nt_len_2") %>% 
+  dplyr::filter(nt_len_1 != nt_len_2) 
+
+intersect_n_list <- purrr::map(seq_len(nrow(nt_df)), function(i) intersect(ZNF_chr_1_list[[nt_df$nt_len_1[i]]], ZNF_chr_1_list[[nt_df$nt_len_2[i]]]) %>% length())
+intersect_overlaps_list <- purrr::map(seq_len(nrow(nt_df)), function(i) intersect(ZNF_chr_1_list[[nt_df$nt_len_1[i]]], ZNF_chr_1_list[[nt_df$nt_len_2[i]]]) %>% paste0(collapse = "; "))
+
+nt_df <- nt_df %>% 
+  mutate(overlap_intersection = intersect_overlaps_list %>% unlist()) %>% 
+  mutate(n_intersect = intersect_n_list %>% unlist())
+
+# from https://stackoverflow.com/questions/22756392/deleting-reversed-duplicates-with-r
+nt_df <- nt_df %>%
+ rowwise() %>%
+ mutate(grp = paste(sort(c(nt_len_1, nt_len_2)), collapse = "_")) %>%
+ group_by(grp) %>%
+ slice(1) %>%
+ ungroup() %>%
+ select(-grp)
+
+nt_df %>% vroom::vroom_write(file = paste0(path_to_files, "/ZNF_simple_vs_complex_comparison.tsv"), num_threads = 50)
+```
+
+
+# Venn diagram
+```{r, fig.width = 10, fig.height = 10}
+triple_venn <- draw.triple.venn(
+  area1 = ER1_df_filtered_list$chr_11$overlaps %>% length(),
+  area2 = PRG_df_filtered_list$chr_11$overlaps %>% length(), 
+  area3 = ZNF_simple_df_filtered_list$chr_11$overlaps %>% length(),
+
+  n12 = ER1_df_filtered_list$chr_11$overlaps %>% intersect(PRG_df_filtered_list$chr_11$overlaps) %>% length(),
+
+  n13 = ER1_df_filtered_list$chr_11$overlaps %>% intersect(ZNF_simple_df_filtered_list$chr_11$overlaps) %>% length(),
+
+  n23 = PRG_df_filtered_list$chr_11$overlaps %>% intersect(ZNF_simple_df_filtered_list$chr_11$overlaps) %>% length(),
+
+  n123 = ER1_df_filtered_list$chr_11$overlaps %>% intersect(PRG_df_filtered_list$chr_11$overlaps) %>% intersect(ZNF_simple_df_filtered_list$chr_11$overlaps) %>% length()
+)
+
+# png(filename = paste0(path_to_files, "venn_diagram.png"), width = 1000, height = 750, units = "px")
+triple_venn %>% grid.draw()
+# dev.off()

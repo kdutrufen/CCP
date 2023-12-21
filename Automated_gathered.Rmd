@@ -1,0 +1,750 @@
+---
+title: "Automated_gathered"
+author: "Carlos Eduardo Madureira Trufen"
+date: "7/15/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r, message=FALSE, warning=FALSE, cache=TRUE}
+library(bestNormalize, warn.conflicts = FALSE)
+library(broom, warn.conflicts = FALSE)
+library(C50, warn.conflicts = FALSE)
+library(caret, warn.conflicts = FALSE)
+library(corrplot, warn.conflicts = FALSE)
+library(clusterCrit, warn.conflicts = FALSE)
+library(CytoML, warn.conflicts = FALSE)
+library(DiffSOM, warn.conflicts = FALSE)
+library(doParallel, warn.conflicts = FALSE)
+library(EmbedSOM, warn.conflicts = FALSE)
+library(FactoMineR, warn.conflicts = FALSE)
+library(factoextra, warn.conflicts = FALSE)
+library(flowClean, warn.conflicts = FALSE)
+library(flowCore, warn.conflicts = FALSE)
+library(flowClust, warn.conflicts = FALSE)
+library(flowStats, warn.conflicts = FALSE)
+library(flowViz, warn.conflicts = FALSE)
+library(flowWorkspace, warn.conflicts = FALSE)
+library(FlowSOM, warn.conflicts = FALSE)
+library(furrr, warn.conflicts = FALSE)
+library(ggcyto, warn.conflicts = FALSE)
+library(HDclassif, warn.conflicts = FALSE)
+library(kohonen, warn.conflicts = FALSE)
+library(microbenchmark, warn.conflicts = FALSE)
+library(parallel, warn.conflicts = FALSE)
+library(parallelMap, warn.conflicts = FALSE)
+library(profvis, warn.conflicts = FALSE)
+library(RColorBrewer, warn.conflicts = FALSE)
+library(Rcpp11, warn.conflicts = FALSE)
+library(tictoc, warn.conflicts = FALSE)
+library(tidyverse, warn.conflicts = FALSE)
+library(yasomi, warn.conflicts = FALSE)
+# source("~/PRIMUS/home/trufenc/new_SOM_functions.R")
+source("/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=home/trufenc/new_SOM_functions.R")
+```
+
+```{r}
+scale_to_range_0_1 <- function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+```
+
+path to files
+```{r path_to_files, cache=TRUE}
+path_to_files <- "~/PRIMUS/data/83_BIOINFORMATICS/Carlos"
+# path_to_files <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Carlos"
+# path_to_files <- "smb://primus.img.cas.cz/data/83_BIOINFORMATICS/Carlos"
+```
+
+```{r}
+# path_to_control_files_1 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2018/CCP_cohorts_2018_12/2018_12_27_C067/2018_12_27_PA/C067_cA1556_gates"
+# 
+# path_to_control_files_2 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90692"
+# 
+# path_to_control_files_3 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90695"
+# 
+# path_to_control_files_4 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_06/2019_06_10_C088/"
+# 
+# path_to_control_files_5 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_06/2019_06_10_C088/"
+# 
+# path_to_ko_files_1 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8038"
+# 
+# path_to_ko_files_2 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8040"
+```
+
+```{r}
+path_to_control_files_1 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2018/CCP_cohorts_2018_12/2018_12_27_C067/2018_12_27_PA/C067_cA1556_gates"
+
+path_to_control_files_2 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90692"
+
+path_to_control_files_3 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90695"
+
+path_to_control_files_4 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_06/2019_06_10_C088/C088_PA_c89141_gates"
+
+path_to_control_files_5 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_06/2019_06_10_C088/C088_PA_c90043_gates"
+
+path_to_ko_files_1 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8038"
+
+path_to_ko_files_2 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8040"
+```
+
+```{r}
+path_to_files <- list(path_to_control_files_1,
+                      path_to_control_files_2,
+                      path_to_control_files_3,
+                      path_to_control_files_4,
+                      path_to_control_files_5)
+
+path_to_ko_files <- list(path_to_ko_files_1,
+                           path_to_ko_files_2)
+```
+
+```{r files, cache=TRUE}
+files <- path_to_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+ko_files <- path_to_ko_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+```
+
+```{r file_names, cache=TRUE}
+file_names <- path_to_files %>% purrr::map(list.files, pattern = ".fcs")
+ko_files_names <- path_to_ko_files %>% purrr::map(list.files, pattern = ".fcs")
+```
+
+```{r}
+panel_A_classes <- c(
+  "_clog\\+.fcs",
+  "_clog\\-_cells\\-.fcs",
+  "_S1\\-.fcs",
+  "_dead.fcs",
+  "_S2\\-.fcs",
+  "gdTCR_Eff_Klrg1\\-.fcs",
+  "gdTCR_Eff_Klrg1\\+.fcs",
+  "gdTCR_Res_Klrg1\\-.fcs",
+  "gdTCR_Res_Klrg1\\+.fcs",
+  "gdTCR_neg_Klrg1\\-.fcs",
+  "gdTCR_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  #"_CD5\\+\\-.fcs",
+  #"_CD4\\+ NKT\\+ or CD4\\- NKT\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Tregs_Eff_Klrg1\\-.fcs",
+  "Tregs_Eff_Klrg1\\+.fcs",
+  "Tregs_Res_Klrg1\\-.fcs",
+  "Tregs_Res_Klrg1\\+.fcs",
+  "Tregs_neg_Klrg1\\-.fcs",
+  "Tregs_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_1 <- purrr::map(seq_along(panel_A_classes), function(i) files[[1]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist()
+files_to_load_1 <- files[[1]][indices_1]
+files_to_load_names_1 <- file_names[[1]][indices_1]
+```
+
+# Second class assignment, more refined - gates_c90692
+```{r}
+panel_A_classes_2 <- c(
+  "clog\\-\\-.fcs",
+  "cells\\-.fcs",
+  "S1\\-.fcs",
+  "dead.fcs",
+  "S2\\-.fcs",
+  "gd_Eff_Klrg1\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+.fcs",
+  "gd_Res_Klrg1\\+\\-.fcs",
+  "gd_Res_Klrg1\\+.fcs",
+  "gd_neg_Klrg1\\+\\-.fcs",
+  "gd_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\+\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\+\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Treg_Eff_Klrg1\\+\\-.fcs",
+  "Treg_Eff_Klrg1\\+.fcs",
+  "Treg_Res_Klrg1\\+\\-.fcs",
+  "Treg_Res_Klrg1\\+.fcs",
+  "Treg_neg_Klrg1\\+\\-.fcs",
+  "Treg_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\+\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\+\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\+\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_2 <- purrr::map(seq_along(panel_A_classes_2), function(i) files[[2]] %>% str_which(pattern = panel_A_classes_2[i])) %>% unlist()
+files_to_load_2 <- files[[2]][indices_2]
+files_to_load_names_2 <- file_names[[2]][indices_2]
+
+files_to_load_2[files_to_load_2 %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+files_to_load_2 <- files_to_load_2[!is.na(files_to_load_2)]
+```
+
+# Second class assignment, more refined - gates_c90695
+```{r}
+panel_A_classes_3 <- panel_A_classes_4 <- panel_A_classes_5 <- c(
+  "clog\\-\\-.fcs",
+  "clog\\-_cells\\-.fcs",
+  "S1\\-.fcs",
+  "dead.fcs",
+  "S2\\-.fcs",
+  "gd_Eff_Klrg1\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+.fcs",
+  "gd_Res_Klrg1\\+\\-.fcs",
+  "gd_Res_Klrg1\\+.fcs",
+  "gd_neg_Klrg1\\+\\-.fcs",
+  "gd_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\+\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\+\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Treg_Eff_Klrg1\\+\\-.fcs",
+  "Treg_Eff_Klrg1\\+.fcs",
+  "Treg_Res_Klrg1\\+\\-.fcs",
+  "Treg_Res_Klrg1\\+.fcs",
+  "Treg_neg_Klrg1\\+\\-.fcs",
+  "Treg_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\+\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\+\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\+\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_3 <- purrr::map(seq_along(panel_A_classes_3), function(i) files[[3]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+files_to_load_3 <- files[[3]][indices_3]
+files_to_load_names_3 <- file_names[[3]][indices_3]
+```
+
+```{r}
+indices_4 <- purrr::map(seq_along(panel_A_classes_4), function(i) files[[4]] %>% str_which(pattern = panel_A_classes_4[i])) %>% unlist()
+files_to_load_4 <- files[[4]][indices_4]
+files_to_load_names_4 <- file_names[[4]][indices_4]
+```
+
+```{r}
+indices_5 <- purrr::map(seq_along(panel_A_classes_5), function(i) files[[5]] %>% str_which(pattern = panel_A_classes_5[i])) %>% unlist()
+files_to_load_5 <- files[[5]][indices_5]
+files_to_load_names_5 <- file_names[[5]][indices_5]
+```
+
+All the classes for panel A
+```{r}
+panel_A_classes_v <- c(
+  "clog+",
+  "cells-",
+  "S1-",
+  "dead",
+  "S2-",
+  "gdTCR_Eff_Klrg1-",
+  "gdTCR_Eff_Klrg1+",
+  "gdTCR_Res_Klrg1-",
+  "gdTCR_Res_Klrg1+",
+  "gdTCR_neg_Klrg1-",
+  "gdTCR_neg_Klrg1+",
+  "NK_Eff_Klrg1-",
+  "NK_Eff_Klrg1+",
+  "NK_Res_Klrg1-",
+  "NK_Res_Klrg1+",
+  "NK_neg_Klrg1+-",
+  "NK_neg_Klrg1+",
+  "CD4-NKT_Eff_Klrg1-",
+  "CD4-NKT_Eff_Klrg1+",
+  "CD4-NKT_Res_Klrg1-",
+  "CD4-NKT_Res_Klrg1+",
+  "CD4-NKT_neg_Klrg1-",
+  "CD4-NKT_neg_Klrg1+",
+  "CD4+NKT_Eff_Klrg1-",
+  "CD4+NKT_Eff_Klrg1+",
+  "CD4+NKT_Res_Klrg1-",
+  "CD4+NKT_Res_Klrg1+",
+  "CD4+NKT_neg_Klrg1-",
+  "CD4+NKT_neg_Klrg1+",
+  "DN",
+  "Tregs_Eff_Klrg1-",
+  "Tregs_Eff_Klrg1+",
+  "Tregs_Res_Klrg1-",
+  "Tregs_Res_Klrg1+",
+  "Tregs_neg_Klrg1-",
+  "Tregs_neg_Klrg1+",
+  "Th_Eff_Klrg1-",
+  "Th_Eff_Klrg1+",
+  "Th_Res_Klrg1-",
+  "Th_Res_Klrg1+",
+  "Th_neg_Klrg1-",
+  "Th_neg_Klrg1+",
+  "CD8_Naive_Klrg1-_VM Tcells-",
+  "CD8_Naive_Klrg1-_VM Tcells",
+  "CD8_Naive_Klrg1+_VM Tcells-",
+  "CD8_Naive_Klrg1+_VM Tcells",
+  "CD8_Eff_Klrg1-_VM Tcells-",
+  "CD8_Eff_Klrg1-_VM Tcells",
+  "CD8_Eff_Klrg1+_VM Tcells-",
+  "CD8_Eff_Klrg1+_VM Tcells",
+  "CD8_Res_Klrg1-_VM Tcells-",
+  "CD8_Res_Klrg1-_VM Tcells",
+  "CD8_Res_Klrg1+_VM Tcells-",
+  "CD8_Res_Klrg1+_VM Tcells",
+  "CD8_neg_Klrg1-_VM Tcells-",
+  "CD8_neg_Klrg1-_VM Tcells",
+  "CD8_neg_Klrg1+_VM Tcells-",
+  "CD8_neg_Klrg1+_VM Tcells"
+)
+```
+
+```{r}
+ko_indices_1 <- purrr::map(seq_along(panel_A_classes_3), function(i) ko_files[[1]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+ko_files_to_load_1 <- ko_files[[1]][ko_indices_1]
+ko_files_to_load_names_1 <- ko_files_names[[1]][ko_indices_1]
+```
+
+```{r}
+ko_indices_2 <- purrr::map(seq_along(panel_A_classes_3), function(i) ko_files[[2]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+ko_files_to_load_2 <- ko_files[[2]][ko_indices_2]
+ko_files_to_load_names_2 <- ko_files_names[[2]][ko_indices_2]
+```
+
+# Load files and pre-procees them ()
+```{r pre_process_data}
+files_to_load <- c(files_to_load_1, files_to_load_2, files_to_load_4, files_to_load_5, ko_files_to_load_1, ko_files_to_load_2)
+files_to_load[files_to_load %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+files_to_load <- files_to_load[!is.na(files_to_load)]
+
+test_files <- c(files_to_load_3)
+
+diff_som_1 <- files_to_load %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+test_diff_som <- test_files %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+
+pre_process_data <- function(diff_som, to_transform = c(1:18)){
+  # diff_som$fs$data <- diff_som$fs$data %>% purrr::set_names(str_remove(string = names(diff_som$fs$data), pattern = "FJComp."))
+  diff_som_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+  normally_dstributed <- diff_som_df %>% purrr::map(bestNormalize::orderNorm)
+  normally_dstributed_df <- purrr::map(seq_along(normally_dstributed), function(i) normally_dstributed[[i]]$x.t) %>% purrr::set_names(colnames(diff_som_df)) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols()
+  diff_som$fs$data[, to_transform] <- normally_dstributed_df %>% as.matrix()
+  return(diff_som)
+}
+
+diff_som_1 <- diff_som_1 %>% pre_process_data()
+test_diff_som <- test_diff_som %>% pre_process_data()
+```
+
+```{r}
+# diff_som_1 %>% saveRDS(file = "~/Documents/diff_som_1_2020_07_10.rds")
+# test_diff_som %>% saveRDS(file = "~/Documents/test_diff_som_2020_07_10.rds")
+```
+
+
+
+# fcs data df
+```{r build_fcs_data_df}
+# cell_types <- files_to_load_names %>% str_remove(pattern = ".fcs") %>% str_remove(pattern = "export_Specimen_..._c....._..._..._")
+cell_types_control <- c(files_to_load_names_1, files_to_load_names_2, files_to_load_names_4, files_to_load_names_5) %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._c....._..._..._")
+
+cell_types_ko <- c(ko_files_to_load_names_1, ko_files_to_load_names_2) %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._tg....._..._..._")
+
+cell_types <- c(cell_types_control, cell_types_ko)
+cell_types[cell_types %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+cell_types <- cell_types[!is.na(cell_types)]
+
+build_fcs_data_df <- function(cell_types, diff_som) {
+  
+  cell_types_df <- cell_types %>%
+    as.data.frame() %>%
+    rownames_to_column() %>%
+    dplyr::rename("cell_types" = ".", "File" = "rowname") %>%
+    mutate(File = File %>% as.numeric())
+
+  cell_types_df <- cell_types_df %>%
+    mutate(cell_types = cell_types %>% recode(
+      "clog--" = "clog+",
+      "clog-_cells-" = "cells-",
+      "cells_S1-" = "S1-",
+      "S2_dead" = "dead",
+      "S1_S2-" = "S2-",
+      "NK_Eff_Klrg1+-" = "NK_Eff_Klrg1-",
+      "NK_Res_Klrg1+-" = "NK_Res_Klrg1-",
+      "NK_neg_Klrg1+-" = "NK_neg_Klrg1-",
+      "gd_Eff_Klrg1+" = "gdTCR_Eff_Klrg1+",
+      "gd_Eff_Klrg1+-" = "gdTCR_Eff_Klrg1-",
+      "gd_Res_Klrg1+" = "gdTCR_Res_Klrg1+",
+      "gd_Res_Klrg1+-" = "gdTCR_Res_Klrg1-",
+      "gd_neg_Klrg1+" = "gdTCR_neg_Klrg1+",
+      "gd_neg_Klrg1+-" = "gdTCR_neg_Klrg1-",
+      "CD4-NKT_Eff_Klrg1+-" = "CD4-NKT_Eff_Klrg1-",
+      "CD4-NKT_Res_Klrg1+-" = "CD4-NKT_Res_Klrg1-",
+      "CD4-NKT_neg_Klrg1+-" = "CD4-NKT_neg_Klrg1-",
+      "CD4+NKT_Eff_Klrg1+-" = "CD4+NKT_Eff_Klrg1-",
+      "CD4+NKT_Res_Klrg1+-" = "CD4+NKT_Res_Klrg1-",
+      "CD4+NKT_neg_Klrg1+-" = "CD4+NKT_neg_Klrg1-",
+      "Th_Eff_Klrg1+-" = "Th_Eff_Klrg1-",
+      "Th_Res_Klrg1+-" = "Th_Res_Klrg1-",
+      "Th_neg_Klrg1+-" = "Th_neg_Klrg1-",
+      "Treg_Eff_Klrg1+-" = "Tregs_Eff_Klrg1-",
+      "Treg_Res_Klrg1+-" = "Tregs_Res_Klrg1-",
+      "Treg_neg_Klrg1+-" = "Tregs_neg_Klrg1-",
+      "Treg_Eff_Klrg1+" = "Tregs_Eff_Klrg1+",
+      "Treg_Res_Klrg1+" = "Tregs_Res_Klrg1+",
+      "Treg_neg_Klrg1+" = "Tregs_neg_Klrg1+",
+      "CD8_Naive_Klrg1-_VM Tcells" = "CD8_Naive_Klrg1-_VM Tcells+",
+      "CD8_Naive_Klrg1+_VM Tcells" = "CD8_Naive_Klrg1+_VM Tcells+",
+      "CD8_Eff_Klrg1-_VM Tcells" = "CD8_Eff_Klrg1-_VM Tcells+",
+      "CD8_Eff_Klrg1+_VM Tcells" = "CD8_Eff_Klrg1+_VM Tcells+",
+      "CD8_Res_Klrg1-_VM Tcells" = "CD8_Res_Klrg1-_VM Tcells+",
+      "CD8_Res_Klrg1+_VM Tcells" = "CD8_Res_Klrg1+_VM Tcells+",
+      "CD8_neg_Klrg1-_VM Tcells" = "CD8_neg_Klrg1-_VM Tcells+",
+      "CD8_neg_Klrg1+_VM Tcells" = "CD8_neg_Klrg1+_VM Tcells+",
+      "CD8+_Eff_Klrg1-_VM Tcells-" = "CD8_Eff_Klrg1-_VM Tcells-",
+      "CD8+_Eff_Klrg1+_VM Tcells" = "CD8_Eff_Klrg1+_VM Tcells+",
+      "CD8+_Eff_Klrg1+_VM Tcells-" = "CD8_Eff_Klrg1+_VM Tcells-",
+      "CD8+_Naive_Klrg1-_VM Tcells" = "CD8_Naive_Klrg1-_VM Tcells+",
+      "CD8+_Naive_Klrg1-_VM Tcells-" = "CD8_Naive_Klrg1-_VM Tcells-",
+      "CD8+_Naive_Klrg1+_VM Tcells" = "CD8_Naive_Klrg1+_VM Tcells+",
+      "CD8+_Naive_Klrg1+_VM Tcells-" = "CD8_Naive_Klrg1+_VM Tcells-",
+      "CD8+_neg_Klrg1-_VM Tcells" = "CD8_neg_Klrg1-_VM Tcells+",
+      "CD8+_neg_Klrg1-_VM Tcells-" = "CD8_neg_Klrg1-_VM Tcells-",
+      "CD8+_neg_Klrg1+_VM Tcells" = "CD8_neg_Klrg1+_VM Tcells+",
+      "CD8+_neg_Klrg1+_VM Tcells-" = "CD8_neg_Klrg1+_VM Tcells-",
+      "CD8+_Res_Klrg1-_VM Tcells" = "CD8_Res_Klrg1-_VM Tcells+",
+      "CD8+_Res_Klrg1-_VM Tcells-" = "CD8_Res_Klrg1-_VM Tcells-",
+      "CD8+_Res_Klrg1+_VM Tcells" = "CD8_Res_Klrg1+_VM Tcells+",
+      "CD8+_Res_Klrg1+_VM Tcells-" = "CD8_Res_Klrg1+_VM Tcells-"
+    ))
+
+  manual_gating <- diff_som$fs$data %>%
+    as.data.frame() %>%
+    full_join(cell_types_df) %>%
+    na.omit() %>%
+    dplyr::select(cell_types) %>%
+    unlist() %>%
+    as.character() %>%
+    factor()
+
+  facs_data_df <- diff_som$fs$data %>%
+    as.data.frame() %>%
+    dplyr::select(c(1:19))
+  # facs_data_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(to_transform)
+
+  facs_data_df <- facs_data_df %>%
+    purrr::set_names(str_remove(string = names(facs_data_df), pattern = "FJComp."))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(cell_type = manual_gating)
+  
+  return(facs_data_df)
+}
+
+facs_data_df <- diff_som_1 %>% build_fcs_data_df(cell_types = cell_types)
+
+facs_data_df <- facs_data_df %>% 
+  mutate(first_gate = case_when(!(cell_type %in% c("clog+", "cells-", "S1-", "S2-", "dead")) ~ "live"))
+  
+facs_data_df <- facs_data_df %>% 
+  mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+```
+
+
+
+```{r}
+tic()
+facs_data_df_step_2 <- vroom::vroom(file = "~/Documents/imbalanced_facs_data_df_step_2.tsv", delim = ",")
+toc()
+
+step_2_levels <- facs_data_df_step_2$second_gate %>% unique()
+```
+
+
+
+```{r}
+# diff_som <- diff_som_1_train[[1]]
+
+perform_SOM <- function(diff_som, facs_data_df, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE) {
+
+  library(tidyverse)
+  library(DiffSOM)
+  
+  diff_som = diff_som
+  
+  # calculate optimal grid
+  vesanto_dim <- diff_som$fs$data %>%
+    nrow() %>%
+    sqrt() %>%
+    "*"(5)
+  
+  grid_dim <- vesanto_dim %>%
+    sqrt() %>%
+    ceiling() %>%
+    "+"(20)
+
+  # SOM
+  reseed()
+  ds_step_1 <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = columns_to_use, importance = importance, nclust = grid_dim * grid_dim, rlen = 5)
+
+  # Optional to normalize weights
+  if (normalize_weights) {
+    ds_step_1$map$codes <- purrr::map(seq_len(ncol(ds_step_1$map$codes)), function(i) {ds_step_1$map$codes[, i] %>% bestNormalize::orderNorm() %>% .[["x.t"]] %>% scale_to_range_0_1()}) %>% purrr::set_names(colnames(ds_step_1$map$codes)) %>% bind_cols()
+  }
+
+  grid_clustering_df <- ds_step_1$map$grid %>%
+    as.data.frame() %>%
+    rownames_to_column() %>%
+    mutate(cluster = ds_step_1$clust) %>%
+    mutate(rowname = rowname %>% as.numeric()) %>%
+    bind_cols(as.data.frame(ds_step_1$map$codes))
+
+  EmbedSOM_results_df <- ds_step_1$fs$data %>%
+    as.data.frame() %>%
+    mutate(mapping = ds_step_1$map$mapping[, 1]) %>%
+    left_join(grid_clustering_df, by = c("mapping" = "rowname")) %>%
+    mutate(first_gate = facs_data_df$first_gate)
+
+  output <- list(EmbedSOM_results_df = EmbedSOM_results_df,
+                 diff_som = ds_step_1)
+  
+  return(output)
+}
+
+```
+
+# C5.0 on SOM
+```{r}
+process_C5_from_SOM <- function(df, features, ...){  
+  library(tidyverse, warn.conflicts = FALSE)
+  library(caret, warn.conflicts = FALSE)
+  library(C50, warn.conflicts = FALSE)
+  # EmbedSOM_results_df_all = process_step_1_output$EmbedSOM_results_df_all
+  # EmbedSOM_results_df = process_step_1_output$EmbedSOM_results_df
+  # facs_data_df = process_step_1_output$facs_data_df
+  # 
+  # features_all_from_SOM <- EmbedSOM_results_df_all %>% dplyr::select(dplyr::contains(".y"))
+  weights_df <- df %>% dplyr::select(features)
+  # 
+  # features_all_no_SOM <- facs_data_df %>% dplyr::select(-c(first_gate, cell_type))
+  # features_selected_no_SOM <- facs_data_df %>% dplyr::select(-c(first_gate, cell_type)) %>% dplyr::select(c(FSC.A, SSC.A, FSC.H, SSC.W, Indo.1..Violet..A))
+  
+  classes <- df$first_gate %>% factor()
+
+  # rules_model_selected
+  # rules_model <- C5.0(x = features_df, y = classes, trials = 20, rules = TRUE)
+  # tree_model <- C5.0(x = features_df, y = classes, trials = 20, rules = FALSE)
+  
+  # rules_model_all
+  # rules_model <- C5.0(x = features_df, y = classes, trials = 20, rules = TRUE)
+  # tree_model <- C5.0(x = features_df, y = classes, trials = 20, rules = FALSE)
+  
+  # rules_model_from_SOM
+  rules_model <- C5.0(x = weights_df, y = classes, trials = 1, rules = TRUE)
+  # tree_model <- C5.0(x = weights_df, y = classes, trials = 1, rules = FALSE)
+  
+  # tree_model_from_SOM_all_features
+  # tree_model <- C5.0(x = weights_df, y = classes, trials = 1, rules = FALSE)
+  # rules_model <- C5.0(x = weights_df, y = classes, trials = 1, rules = TRUE)
+  return(rules_model)
+}
+```
+
+# Since the winner strategy is SOM - selected features - normalize weights, let's apply it to the whole dataset:
+```{r}
+tic()
+EmbedSOM_results_whole_data <- perform_SOM(diff_som = diff_som_1, facs_data_df = facs_data_subset_df, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE)
+toc()
+
+tic()
+step_1_rules_models_SOM_selected_features <- process_C5_from_SOM(df = EmbedSOM_results_whole_data$EmbedSOM_results_df, features = dplyr::contains(".y"))
+toc()
+
+tic()
+EmbedSOM_results_new_data <- perform_SOM(diff_som = diff_som_1, facs_data_df = facs_data_subset_df, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE)
+toc()
+
+
+
+selected_features_SOM_classification <- predict(step_1_rules_models_SOM_selected_features, newdata = facs_data_df %>% dplyr::select(-c("cell_type")))
+```
+
+
+
+
+
+
+
+
+
+
+# Step 2
+gamma delta T cells
+NK cells
+CD4+ NKT cells
+CD4- NKT cells
+Tregs CD4+ T cells
+Thelp CD4+ T cells
+CD8+ T cells
+
+8 classes to predict at step 2
+```{r}
+facs_data_df_step_2 <- facs_data_df %>% dplyr::filter(first_gate == "live")
+
+facs_data_df_step_2 <- facs_data_df_step_2 %>% 
+  mutate(second_gate = if_else(cell_type %>% str_detect(pattern = "gdTCR"), true = "gdTCR_cells", false =  as.character(cell_type)))
+
+facs_data_df_step_2 <- facs_data_df_step_2 %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "NK_"), true = "NK_cells", false =  second_gate)) %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD4\\-NKT_"), true = "CD4-NKT_cells", false =  second_gate)) %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD4\\+NKT_"), true = "CD4+NKT_cells", false =  second_gate)) %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "Tregs_"), true = "Tregs_CD4+_cells", false =  second_gate)) %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "Th_"), true = "Th_CD4+_cells", false =  second_gate)) %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD8"), true = "CD8+_cells", false =  second_gate))
+
+facs_data_df_step_2 <- facs_data_df_step_2 %>% dplyr::select(-c(Time, cell_type, first_gate))
+
+facs_data_df_step_2 <- facs_data_df_step_2 %>% mutate(second_gate = second_gate %>% factor)
+
+# facs_data_df_step_2 %>% write.table(file = "~/Documents/facs_data_df_step_2.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+```
+
+```{r}
+test_facs_data_df <- test_diff_som %>% build_fcs_data_df(cell_types = cell_types)
+
+test_facs_data_df <- test_facs_data_df %>% 
+  mutate(first_gate = case_when(!(cell_type %in% c("clog+", "cells-", "S1-", "S2-", "dead")) ~ "live"))
+  
+test_facs_data_df <- test_facs_data_df %>% 
+  mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+
+test_facs_data_df_step_2 <- test_facs_data_df %>% dplyr::filter(first_gate == "live")
+
+test_facs_data_df_step_2 <- test_facs_data_df_step_2 %>% 
+  mutate(second_gate = if_else(cell_type %>% str_detect(pattern = "gdTCR"), true = "gdTCR_cells", false =  as.character(cell_type)))
+
+test_facs_data_df_step_2 <- test_facs_data_df_step_2 %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "NK_"), true = "NK_cells", false =  second_gate)) %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD4\\-NKT_"), true = "CD4-NKT_cells", false =  second_gate)) %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD4\\+NKT_"), true = "CD4+NKT_cells", false =  second_gate)) %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "Tregs_"), true = "Tregs_CD4+_cells", false =  second_gate)) %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "Th_"), true = "Th_CD4+_cells", false =  second_gate)) %>% 
+  mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD8"), true = "CD8+_cells", false =  second_gate))
+
+test_facs_data_df_step_2 <- test_facs_data_df_step_2 %>% dplyr::select(-c(Time, cell_type, first_gate))
+
+test_facs_data_df_step_2 <- test_facs_data_df_step_2 %>% mutate(second_gate = second_gate %>% factor)
+
+# test_facs_data_df_step_2 %>% write.table(file = "~/Documents/test_facs_data_df_step_2.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+```
+
+
+
+

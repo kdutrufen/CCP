@@ -1,0 +1,1410 @@
+---
+title: "scRNAseq_Zhong_et_al"
+author: "Carlos Eduardo Madureira Trufen"
+date: "2022-12-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r}
+library(biomaRt)
+library(cowplot)
+library(data.table)
+# library(DESeq2)
+library(edgeR)
+# library(GeneBook)
+library(ggeasy)
+library(ggfortify)
+library(ggwordcloud)
+# library(mmtable2)
+library(org.Rn.eg.db)
+library(org.Mm.eg.db)
+library(patchwork)
+library(pathview)
+library(readr)
+library(readxl)
+library(RColorBrewer)
+library(RUVSeq)
+library(scater)
+library(scDblFinder)
+library(scuttle)
+library(Seurat)
+library(SingleCellExperiment)
+library(tictoc)
+library(tidyverse)
+library(VennDiagram)
+
+library(AUCell)
+library(aplot)
+library(batchelor)
+# library(beachmat)
+library(biomaRt)
+library(bluster)
+library(cluster)
+library(celldex)
+library(corral)
+library(cowplot)
+# library(clusterProfiler)
+library(clustree)
+library(DESeq2)
+library(edgeR) 
+library(factoextra)
+library(ggeasy)
+library(ggpubr)
+library(GSEABase)
+library(HDF5Array)
+library(kBET)
+library(limma)
+library(Matrix)
+library(mmtable2)
+library(org.Mm.eg.db)
+library(msigdbr)
+library(patchwork)
+library(PCAtools)
+library(pheatmap)
+library(qs)
+library(Rhdf5lib)
+library(rhdf5)
+library(Seurat)
+library(slingshot)
+library(scran)
+library(scater)
+library(scDblFinder)
+library(scRNAseq)
+library(SingleCellExperiment)
+library(tictoc)
+library(tidyverse)
+library(TSCAN)
+library(uwot)
+library(zellkonverter)
+```
+
+# path to files
+```{r}
+# path_to_files <- "/media/carlos/HD_10_TB/scRNAseq_Zhong_et_al/"
+path_to_files <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/scRNAseq_Zhong_et_al/"
+# path_to_files <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNAseq_Zhong_et_al/"
+```
+
+# Enrichment analysis (ORA)
+# custom ORA
+# Databases
+```{r}
+# path_to_gmt <- "~/PRIMUS/home/trufenc/GMT/"
+path_to_gmt <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=home/trufenc/GMT/"
+
+WikiPathways_2019_Human <- path_to_gmt %>% paste0("WikiPathways_2019_Human.txt") # WikiPathways_2019_Human gene sets
+WikiPathways_2019_Mouse <- path_to_gmt %>% paste0("WikiPathways_2019_Mouse.txt") # WikiPathways_2019_Mouse gene sets
+KEGG_2019_Human <- path_to_gmt %>% paste0("KEGG_2019_Human.txt") # KEGG_2019_Human gene sets
+KEGG_2019_Mouse <- path_to_gmt %>% paste0("KEGG_2019_Mouse.txt") # KEGG_2019_Mouse gene sets
+LINCS_L1000_Chem_Pert_down <- path_to_gmt %>% paste0("LINCS_L1000_Chem_Pert_down.txt") # LINCS_L1000_Chem_Pert_down gene sets
+LINCS_L1000_Chem_Pert_up <- path_to_gmt %>% paste0("LINCS_L1000_Chem_Pert_up.txt") # LINCS_L1000_Chem_Pert_up gene sets
+Reactome_2016 <- path_to_gmt %>% paste0("Reactome_2016.txt") # Reactome_2016 gene sets
+GO_Molecular_Function_2018 <- path_to_gmt %>% paste0("GO_Molecular_Function_2018.txt") # GO_Molecular_Function_2018 gene sets
+GO_Cellular_Component_2018 <- path_to_gmt %>% paste0("GO_Cellular_Component_2018.txt") # GO_Cellular_Component_2018 gene sets
+GO_Biological_Process_2018 <- path_to_gmt %>% paste0("GO_Biological_Process_2018.txt") # GO_Biological_Process_2018 gene sets
+GO_Molecular_Function_2021 <- path_to_gmt %>% paste0("GO_Molecular_Function_2021.txt") # GO_Molecular_Function_2021 gene sets
+GO_Cellular_Component_2021 <- path_to_gmt %>% paste0("GO_Cellular_Component_2021.txt") # GO_Cellular_Component_2021 gene sets
+GO_Biological_Process_2021 <- path_to_gmt %>% paste0("GO_Biological_Process_2021.txt") # GO_Biological_Process_2021 gene sets
+BioPlanet_2019 <- path_to_gmt %>% paste0("BioPlanet_2019.txt") # BioPlanet_2019 gene sets
+
+C8_cell_type_signatures <- path_to_gmt %>% paste0("c8.all.v7.4.symbols.gmt") # C8 MSigDB
+```
+
+# 1M (1 + 1.5 M) dataset
+
+# metadata
+```{r}
+metadata_df <- read_delim(paste0(path_to_files, "SCP1017/metadata/metadata.csv"), 
+                          delim = ",", escape_double = FALSE, 
+                          trim_ws = TRUE)
+
+metadata_df <- metadata_df %>% 
+  dplyr::slice(-1) %>% 
+  # separate(col = "NAME", into = c("dataset", "cell")) %>% 
+  separate(col = "Cluster", into = c("cluster", "cell_type"))
+```
+
+# t-SNE data
+```{r}
+tsne_df <- read_delim(paste0(path_to_files, "SCP1017/cluster/embedding.txt"), 
+                      delim = "\t", escape_double = FALSE, 
+                      trim_ws = TRUE)
+
+tsne_df <- tsne_df %>% 
+  dplyr::slice(-1) %>% 
+  # separate(col = "NAME", into = c("dataset", "cell")) %>% 
+  mutate_at(.vars = c("X", "Y"), .funs = as.numeric) %>%
+  dplyr::rename(cluster = Category) %>% 
+  full_join(metadata_df)
+  # mutate(Category = Category %>% factor()) %>% 
+  
+```
+
+# plot tsne
+```{r}
+# CH1: chondrocyte 1
+# CH2: chondrocyte 2
+
+# IMP: intermediate mesenchymal progenitor
+
+# EMP: early mesenchymal progenitor
+# LMP: late mesenchymal progenitor
+
+# LCP: lineage comitted progenitors
+# MALPs: marrow adipogenic lineage precursors
+
+# OB: osteoblast
+# Ocy: osteocyte
+
+tsne_cell_type <- tsne_df %>% 
+  # dplyr::filter(!cell_type %in% c("CH1", "CH2")) %>% 
+  ggplot(aes(x = X, y = Y, color = cell_type)) + 
+  geom_point() +
+  theme_bw() +
+  scale_color_manual(labels = c("Chondrocyte 1", "Chondrocyte 2", "Early mesenchymal progenitor", "Intermediate mesenchymal progenitor", "Lineage comitted progenitors", "Late mesenchymal progenitor", "Marrow adipogenic lineage precursor", "Osteoblast", "Osteocyte"), 
+                     # values = colorRampPalette(RColorBrewer::brewer.pal(n = 8, name = "Dark2"))(9)
+                     values = RColorBrewer::brewer.pal(n = 9, name = "Paired")
+                     ) +
+  labs(x = "TSNE 1", y = "TSNE 2")
+
+tsne_cell_type %>% ggsave(filename = paste0(path_to_files, "tsne_cell_type_paper.png"), width = 10, height = 7, dpi = 900)
+```
+
+
+# Expression data
+```{r}
+exp_df <- vroom::vroom(
+  # file = paste0(path_to_files, "Haber_et_al_2017/regional_cell_sampling_UMIcounts.txt"),
+  # file = paste0(path_to_files, "Haber_et_al_2017/AtlasFullLength_log2TPM.txt"),
+  file = paste0(path_to_files, "SCP1017/expression/matrixnew.txt"),
+  delim = "\t", 
+  escape_double = FALSE, 
+  trim_ws = TRUE,
+  progress = TRUE, 
+  num_threads = 50
+  )
+
+column_ids <- colnames(exp_df)
+
+exp_df <- exp_df %>% 
+  purrr::set_names("gene", paste0("V", 1:(ncol(exp_df) - 1))) %>% 
+  separate(col = "V7584", into = c("V7584", "V7585"), sep = "\t") %>% 
+  purrr::set_names("gene", column_ids)
+
+row_ids <- exp_df$gene
+
+exp_df <- exp_df %>% column_to_rownames(var = "gene")
+```
+
+# Single Cell Experiment object
+```{r}
+sce <- SingleCellExperiment(assays = list(logcounts = exp_df), 
+                                  colData = column_ids,
+                                  rowData = row_ids)
+rownames(sce) <- row_ids
+sce@int_colData@listData$reducedDims$TSNE <- tsne_df %>% 
+  dplyr::select(X, Y) 
+```
+
+```{r}
+tsne_data %>% 
+  ggplot(aes(x = X, y = Y, color = Category)) +
+  geom_point() +
+  theme_bw() +
+  labs(x = "TSNE 1", y = "TSNE 2")
+```
+
+```{r}
+gene_tsne_plots <- function(gene, sce){
+  
+  tsne_df <- sce@int_colData@listData$reducedDims$TSNE %>% as.data.frame()
+  gene_expression <- sce@assays@data$logcounts[gene,] %>% as.numeric()
+
+tsne_plot <- tsne_df %>% 
+  ggplot(aes(x = X, y = Y, color = gene_expression)) +
+    geom_point() +
+    scale_color_continuous(low = "grey", high = "blue", guide = "colourbar", aesthetics = "colour") +
+    theme_bw() + 
+    labs(x = "TSNE 1", y = "TSNE 2", title = gene)
+
+return(tsne_plot)
+}
+
+Fgf9_tsne_expr <- gene_tsne_plots(sce = sce, gene = "Fgf9")
+Fgf16_tsne_expr <- gene_tsne_plots(sce = sce, gene = "Fgf16")
+Fgf20_tsne_expr <- gene_tsne_plots(sce = sce, gene = "Fgf20")
+
+Fgf9_tsne_expr %>% 
+  ggsave(filename = paste0(path_to_files, "Fgf9_tsne_expr.png"), width = 10, height = 7, dpi = 900)
+
+Fgf16_tsne_expr %>% 
+  ggsave(filename = paste0(path_to_files, "Fgf16_tsne_expr.png"), width = 10, height = 7, dpi = 900)
+
+Fgf20_tsne_expr %>% 
+  ggsave(filename = paste0(path_to_files, "Fgf20_tsne_expr.png"), width = 10, height = 7, dpi = 900)
+
+# Other fibroblast growth factors: Fgf1, Fgf2, Fgf3, Fgf7, Fgf10, Fgf11, Fgf13, Fgf15, and Fgf18
+gene_tsne_plots(sce = sce, gene = "Fgf1")
+gene_tsne_plots(sce = sce, gene = "Fgf2")
+gene_tsne_plots(sce = sce, gene = "Fgf3")
+gene_tsne_plots(sce = sce, gene = "Fgf7")
+gene_tsne_plots(sce = sce, gene = "Fgf10")
+gene_tsne_plots(sce = sce, gene = "Fgf11")
+gene_tsne_plots(sce = sce, gene = "Fgf13")
+gene_tsne_plots(sce = sce, gene = "Fgf15")
+gene_tsne_plots(sce = sce, gene = "Fgf18")
+
+```
+
+
+
+
+
+
+
+
+# Applying my pipeline to the data
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE128423
+
+# Load data
+```{r}
+GSM4318799_1M_df <- vroom::vroom(file = paste0(path_to_files, "GSM4318799_1M_matrix.txt"), delim = " ", num_threads = 50)
+
+col_names <- colnames(GSM4318799_1M_df)
+GSM4318799_1M_df <- GSM4318799_1M_df %>% 
+  separate(col = 5745, sep = " ", into = c("cell_5745", "cell_5746")) %>% 
+  purrr::set_names(c("gene", col_names))
+
+GSM4318799_1M_df <- GSM4318799_1M_df %>% 
+  mutate(gene = gene %>% make.unique) %>% 
+  column_to_rownames(var = "gene") %>% 
+  mutate_all(as.numeric) %>% 
+  mutate_all(replace_na, replace = 0)
+
+GSM4318799_1M_df[, ncol(GSM4318799_1M_df)]
+
+GSM4318800_1.5M_df <- vroom::vroom(file = paste0(path_to_files, "GSM4318800_1.5M_matrix.txt"), delim = " ", num_threads = 50)
+
+col_names <- colnames(GSM4318800_1.5M_df)
+GSM4318800_1.5M_df <- GSM4318800_1.5M_df %>% 
+  separate(col = 5745, sep = " ", into = c("cell_5745", "cell_5746")) %>% 
+  purrr::set_names(c("gene", col_names))
+
+GSM4318800_1.5M_df <- GSM4318800_1.5M_df %>% 
+  mutate(gene = gene %>% make.unique) %>% 
+  column_to_rownames(var = "gene") %>% 
+  mutate_all(as.numeric) %>% 
+  mutate_all(replace_na, replace = 0)
+
+GSM4318800_1.5M_df[, ncol(GSM4318800_1.5M_df)]
+
+
+colnames(GSM4318800_1.5M_df) <- paste0("1.5M__", colnames(GSM4318800_1.5M_df))
+sce_1.5M <- SingleCellExperiment(assays = list(counts = GSM4318800_1.5M_df), colData = colnames(GSM4318800_1.5M_df))
+sce_1.5M %>% qs::qsave(file = paste0(path_to_files, "sce_1.5M_pipeline.qs"), nthreads = 50)
+
+colnames(GSM4318799_1M_df) <- paste0("1M__", colnames(GSM4318799_1M_df))
+sce_1M <- SingleCellExperiment(assays = list(counts = GSM4318799_1M_df), colData = colnames(GSM4318799_1M_df))
+sce_1M %>% qs::qsave(file = paste0(path_to_files, "sce_1M_pipeline.qs"), nthreads = 50)
+```
+
+# Quality control - Mitochondrial genes
+```{r}
+sce_1M <- qs::qread(file = paste0(path_to_files, "sce_1M_pipeline.qs"), nthreads = 50)
+sce_1.5M <- qs::qread(file = paste0(path_to_files, "sce_1.5M_pipeline.qs"), nthreads = 50)
+
+qc_mito <- function(sce){
+  library(scuttle)
+  library(tidyverse)
+  rowData(sce) <- rowData(sce) %>% 
+    as.data.frame() %>% 
+    rownames_to_column(var = "gene") %>% 
+    mutate(featureType = dplyr::if_else(condition = gene %>% str_detect(pattern = "mt-"), true = "mito", false = "cellular")) %>% 
+    as("DFrame")
+  
+  colData(sce) <- sce %>% perCellQCMetrics(subsets = list(Mt = rowData(sce)$featureType == "mito"))
+  qc <- data.frame(
+    low_lib_size = isOutlier(sce[["sum"]], log = TRUE, type = "lower"),
+    low_n_features = isOutlier(sce[["detected"]], log = TRUE, type = "lower"),
+    Mt_percent = isOutlier(sce[["subsets_Mt_percent"]], type = "higher")
+    ) %>% 
+    mutate(discard = purrr::reduce(., `|`)) %>% 
+    as("DFrame")
+  colData(sce) <- as.data.frame(colData(sce)) %>% cbind(as.data.frame(qc)) %>% as("DFrame")
+  sce$qc_mito_discard <- qc$discard
+  sce$Mt_percent <- qc$Mt_percent
+  return(sce)
+  }
+
+sce_1M <- sce_1M %>% qc_mito()
+sce_1.5M <- sce_1.5M %>% qc_mito()
+
+sce_1M %>% plotColData(x = "sum", y = "subsets_Mt_percent", colour_by = "discard")
+sce_1M %>% plotColData(x = "sum", y = "subsets_Mt_percent", colour_by = "Mt_percent")
+
+sce_1.5M %>% plotColData(x = "sum", y = "subsets_Mt_percent", colour_by = "discard")
+sce_1.5M %>% plotColData(x = "sum", y = "subsets_Mt_percent", colour_by = "Mt_percent")
+
+# remove cells with 0 reads
+sce_1M <- sce_1M[, (sce_1M$sum != 0)]
+sce_1.5M <- sce_1.5M[, (sce_1.5M$sum != 0)]
+
+# remove cells with high mitochondrial expresison percentage
+sce_1M_qc_mito <- sce_1M[, (sce_1M$subsets_Mt_percent < 5)]
+sce_1.5M_qc_mito <- sce_1.5M[, (sce_1.5M$subsets_Mt_percent < 5)]
+
+sce_1M_qc_mito %>% qs::qsave(file = paste0(path_to_files, "sce_1M_qc_mito.qs"), nthreads = 50)
+sce_1.5M_qc_mito %>% qs::qsave(file = paste0(path_to_files, "sce_1.5M_qc_mito.qs"), nthreads = 50)
+```
+
+# subset - filter for reads, as in the paper
+```{r}
+sce_1M_qc_mito <- qs::qread(file = paste0(path_to_files, "sce_1M_qc_mito.qs"), nthreads = 50)
+sce_1.5M_qc_mito <- qs::qread(file = paste0(path_to_files, "sce_1.5M_qc_mito.qs"), nthreads = 50)
+
+sce_1M_subset <- sce_1M_qc_mito[, (sce_1M_qc_mito$sum > 200)]
+sce_1.5M_subset <- sce_1.5M_qc_mito[, (sce_1.5M_qc_mito$sum > 200)]
+```
+
+
+```{r}
+process_1_sce <- function(sce){
+  library(dplyr)
+  library(msigdbr)
+  library(scran)
+  # Size factors
+  sizeFactors(sce) <- scater::librarySizeFactors(sce)
+  # remove libraries with 0 reads
+  if(sizeFactors(sce) %>% sort() %>% '=='(0) %>% sum() > 0){sce <- sce[, -c(which(sizeFactors(sce) %>% '=='(0)))]}
+  # Normalize and log-transform data
+  sce  <- sce %>% scater::logNormCounts()
+  
+  ### Feature selection
+  # Remove ribosomal genes
+  c2_sets <- msigdbr(species = "Mus musculus", category = "C2")
+  ribo_set <- c2_sets %>% dplyr::filter(gs_name == "KEGG_RIBOSOME") %>% pull(gene_symbol)
+  ribo_discard <- sce %>% rownames() %in% ribo_set
+  
+  sce <- sce[!ribo_discard, ] # remove histone genes
+  sce <- sce[!rownames(sce) %>% str_detect(pattern = "Hist"), ]# remove histone genes
+  
+  # Variance of the log-counts
+  dec_default <- sce %>% modelGeneVar()
+  # dec_default %>% qs::qsave(file = paste0(source_path, "dec_default.qs"))
+  fit_default <- metadata(dec_default)
+  
+  # Coefficient of variation
+  dec_cv2 <- sce %>% modelGeneCV2()
+  fit_cv2 <- dec_cv2 %>% metadata()
+  plot(fit_cv2$mean, fit_cv2$cv2, log = "xy")
+  curve(fit_cv2$trend(x), col = "dodgerblue", add = TRUE, lwd = 2)
+  
+  # Based on the largest metrics
+  hvg_var <- dec_default %>% 
+    as.data.frame() %>% 
+    dplyr::filter(bio >= 0 & FDR <= 0.05) %>% 
+    rownames()
+  
+  gene_subset <- hvg_var %>% unique()
+  
+  return(list(sce = sce,
+              gene_subset = gene_subset
+              )
+         )
+} 
+
+processed_1_sce_1M <- sce_1M_subset %>% process_1_sce()
+processed_1_sce_1.5M <- sce_1.5M_subset %>% process_1_sce()
+
+processed_1_sce_1M %>% qs::qsave(file = paste0(path_to_files, "processed_1_sce_1M.qs"), nthreads = 50)
+processed_1_sce_1.5M %>% qs::qsave(file = paste0(path_to_files, "processed_1_sce_1.5M.qs"), nthreads = 50)
+```
+
+# Dimensionality reduction results
+```{r}
+processed_1_sce_1M <- qs::qread(file = paste0(path_to_files, "processed_1_sce_1M.qs"), nthreads = 50)
+processed_1_sce_1.5M <- qs::qread(file = paste0(path_to_files, "processed_1_sce_1.5M.qs"), nthreads = 50)
+
+seed <- 123
+gene_subset_1M <- processed_1_sce_1M$gene_subset
+gene_subset_1.5M <- processed_1_sce_1.5M$gene_subset
+
+sce_dimentionality_reduction <- function(sce, gene_subset, seed = 3){
+  ## Choosing the number of PCs
+  set.seed(seed)
+  # bpparam <- BiocParallel::MulticoreParam(workers = n_threads)
+  sce <- sce %>% scater::runPCA(ncomponents = 50, subset_row = gene_subset)
+  
+  # Based on population structure
+  # This strategy is the most pragmatic as it directly addresses the role of the bias-variance trade-off in downstream analyses, specificallyclustering.
+  pcs <- sce %>% reducedDim()
+  choices <- pcs %>% getClusteredPCs()
+  val <- metadata(choices)$chosen
+  reducedDim(sce, "PCA_clust") <- pcs[, 1:val]
+  
+  plot(choices$n.pcs, choices$n.clusters,
+  xlab = "Number of PCs", ylab = "Number of clusters"
+)
+  abline(a = 1, b = 1, col = "red")
+  abline(v = val, col = "grey80", lty = 2)
+
+  # tsne
+  # set.seed(123)
+  set.seed(seed)
+  sce <- sce %>% scater::runTSNE(dimred = "PCA_clust", perplexity = 20)
+
+  # umap - Uniform manifold approximation and projection
+  # set.seed(123)
+  set.seed(seed)
+  sce <- sce %>% scater::runUMAP(dimred = 'PCA_clust', n_neighbors = 20)
+  return(sce)
+}
+
+sce_1M_dim_reduction <- processed_1_sce_1M$sce %>% sce_dimentionality_reduction(gene_subset = processed_1_sce_1M$gene_subset)
+sce_1.5M_dim_reduction <- processed_1_sce_1.5M$sce %>% sce_dimentionality_reduction(gene_subset = processed_1_sce_1.5M$gene_subset)
+
+## Dimensionality reduction for visualization
+sce_1M_dim_reduction %>% plotReducedDim(dimred = "PCA_clust")
+sce_1M_dim_reduction %>% plotReducedDim(dimred = "PCA_clust", ncomponents = 4)
+
+sce_1.5M_dim_reduction %>% plotReducedDim(dimred = "PCA_clust")
+sce_1.5M_dim_reduction %>% plotReducedDim(dimred = "PCA_clust", ncomponents = 4)
+
+cowplot::plot_grid(
+  sce_1M_dim_reduction %>% plotReducedDim(dimred = "TSNE"), 
+  sce_1M_dim_reduction %>% plotReducedDim(dimred = "UMAP")
+  )
+
+cowplot::plot_grid(
+  sce_1.5M_dim_reduction %>% plotReducedDim(dimred = "TSNE"), 
+  sce_1.5M_dim_reduction %>% plotReducedDim(dimred = "UMAP")
+  )
+
+sce_1M_dim_reduction %>% qs::qsave(file = paste0(path_to_files, "sce_1M_dim_reduction.qs"), nthreads = 50)
+sce_1.5M_dim_reduction %>% qs::qsave(file = paste0(path_to_files, "sce_1.5M_dim_reduction.qs"), nthreads = 50)
+```
+
+# Doublet detection with clusters
+```{r}
+sce_1M_dim_reduction <- qs::qread(file = paste0(path_to_files, "sce_1M_dim_reduction.qs"), nthreads = 50)
+sce_1.5M_dim_reduction <- qs::qread(file = paste0(path_to_files, "sce_1.5M_dim_reduction.qs"), nthreads = 50)
+
+remove_doublets <- function(sce){
+  library(Matrix)
+  library(scDblFinder)
+  library(tidyverse)
+  # findDoubletClusters() identifies clusters with expression profiles lying between two other clusters
+  set.seed(123)
+  # bpparam <- BiocParallel::MulticoreParam(workers = 51)
+  # sce <- sce %>% scDblFinder(clusters = colLabels(sce))
+  
+  # counts(sce) <- Matrix(as.matrix(counts(sce)), sparse = TRUE)
+  counts(sce) <- counts(sce) %>% as.matrix()
+  sce <- sce %>% scDblFinder()
+  
+  sce_dbl_finder_results_df <- data.frame(
+    cxds_score = sce$scDblFinder.cxds_score,
+    weighted = sce$scDblFinder.weighted,
+    score = sce$scDblFinder.score,
+    class = sce$scDblFinder.class
+    )
+  
+  cowplot::plot_grid(sce %>% plotTSNE(colour_by = "scDblFinder.score"), 
+                     sce %>% plotUMAP(colour_by = "scDblFinder.score")
+                     )
+  
+  # removing the doublets
+  sce_no_doublet <- sce[, which(sce$scDblFinder.class != "doublet")]
+  
+  set.seed(3)
+  sce_no_doublet <- sce_no_doublet %>% runTSNE(dimred = "PCA_clust")
+  sce_no_doublet %>% plotTSNE(colour_by = "scDblFinder.score")
+  
+  sce_no_doublet <- sce_no_doublet %>% runUMAP(dimred = "PCA_clust")
+  sce_no_doublet %>% plotUMAP(colour_by = "scDblFinder.score")
+  
+  return(sce_no_doublet)
+}
+
+sce_1M_no_doublets <- sce_1M_dim_reduction %>% remove_doublets()
+sce_1.5M_no_doublets <- sce_1.5M_dim_reduction %>% remove_doublets()
+
+cowplot::plot_grid(sce_1M_no_doublets %>% plotTSNE(colour_by = "scDblFinder.score"),
+                   sce_1M_no_doublets %>% plotUMAP(colour_by = "scDblFinder.score")
+                   )
+
+cowplot::plot_grid(sce_1.5M_no_doublets %>% plotTSNE(colour_by = "scDblFinder.score"),
+                   sce_1.5M_no_doublets %>% plotUMAP(colour_by = "scDblFinder.score")
+                   )
+
+sce_1M_no_doublets %>% qs::qsave(file = paste0(path_to_files, "sce_1M_no_doublets.qs"), nthreads = 50)
+sce_1.5M_no_doublets %>% qs::qsave(file = paste0(path_to_files, "sce_1.5M_no_doublets.qs"), nthreads = 50)
+```
+
+# Add annotation from the original paper
+```{r}
+sce_1M_no_doublets <- qs::qread(file = paste0(path_to_files, "sce_1M_no_doublets.qs"), nthreads = 50)
+sce_1.5M_no_doublets <- qs::qread(file = paste0(path_to_files, "sce_1.5M_no_doublets.qs"), nthreads = 50)
+
+colData(sce_1M_no_doublets) <- colData(sce_1M_no_doublets) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "NAME") %>% 
+  left_join(metadata_df) %>% 
+  as("DFrame")
+
+colData(sce_1.5M_no_doublets) <- colData(sce_1.5M_no_doublets) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "NAME") %>% 
+  left_join(metadata_df) %>% 
+  as("DFrame")
+
+sce_1M_no_doublets %>% qs::qsave(file = paste0(path_to_files, "sce_1M_no_doublets.qs"), nthreads = 50)
+sce_1.5M_no_doublets %>% qs::qsave(file = paste0(path_to_files, "sce_1.5M_no_doublets.qs"), nthreads = 50)
+```
+
+
+
+
+# Merge datasets
+```{r}
+sce_1M_no_doublets <- qs::qread(file = paste0(path_to_files, "sce_1M_no_doublets.qs"), nthreads = 50)
+sce_1.5M_no_doublets <- qs::qread(file = paste0(path_to_files, "sce_1.5M_no_doublets.qs"), nthreads = 50)
+
+sce_1M_no_doublets$batch <- "1M"
+sce_1.5M_no_doublets$batch <- "1.5M"
+
+dec_1M_default <- sce_1M_no_doublets %>% modelGeneVar()
+dec_1.5M_default <- sce_1.5M_no_doublets %>% modelGeneVar()
+
+fit_1M_default <- metadata(dec_1M_default)
+fit_1.5M_default <- metadata(dec_1.5M_default)
+
+# Based on the largest metrics
+hvg_var_1M <- dec_1M_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+hvg_var_1.5M <- dec_1.5M_default %>% as.data.frame() %>% dplyr::filter(bio >= 0 & FDR <= 0.05) %>% rownames()
+
+hv_genes_1M <- hvg_var_1M %>% unique() %>% sort()
+hv_genes_1.5M <- hvg_var_1.5M %>% unique() %>% sort()
+
+## Quick start
+#  The first and most obvious is to subset all batches to the common “universe” of features.
+universe <- union(hv_genes_1M, hv_genes_1.5M)
+
+set_diff_1M <- setdiff(universe, rownames(sce_1M_no_doublets))
+set_diff_1.5M <- setdiff(universe, rownames(sce_1.5M_no_doublets))
+
+# sce_1M_matrix <- sce_1M_no_doublets@assays@data$counts %>% as.matrix()
+# sce_1.5M_matrix <- sce_1.5M_no_doublets@assays@data$counts %>% as.matrix()
+
+sce_1M_df <- sce_1M_no_doublets@assays@data$counts %>% as.data.frame() %>% rownames_to_column(var = "gene")
+sce_1.5M_df <- sce_1.5M_no_doublets@assays@data$counts %>% as.data.frame() %>% rownames_to_column(var = "gene")
+
+merged_df <- sce_1M_df %>% full_join(sce_1.5M_df) %>% column_to_rownames(var = "gene")
+
+# library(doParallel)
+# n_threads <- makeCluster(50)
+# registerDoParallel(n_threads)
+# merged_1M_1.5M <- Seurat::RowMergeSparseMatrices(
+#   mat1 = sce_1M_matrix,
+#   mat2 = sce_1.5M_matrix
+#   )
+
+merged_col_data <- SingleCellExperiment::rbind(sce_1M_no_doublets@colData, sce_1.5M_no_doublets@colData)
+
+# sce_merged <- SingleCellExperiment(assays = list(counts = merged_df), colData = merged_col_data)
+
+# sce_merged <- sce_merged[order(row.names(sce_merged)), ]
+
+# sce_merged <- sce_merged %>% logNormCounts()
+
+# Uncorrected
+uncorrected <- SingleCellExperiment(assays = list(counts = merged_df), colData = merged_col_data) 
+uncorrected$batch <- c(sce_1M_no_doublets$batch, sce_1.5M_no_doublets$batch)
+# uncorrected$annotation <- c(sce_1M_no_doublets$annotation, sce_1.5M_no_doublets$annotation)
+# colLabels(uncorrected) <- colLabels(uncorrected) %>% forcats::fct_drop()
+uncorrected <- uncorrected %>% logNormCounts()
+
+# # Using RandomParam() as it is more efficient for file-backed matrices.
+bpparam <- BiocParallel::MulticoreParam(workers = 51)
+set.seed(123)
+
+tic()
+uncorrected <- uncorrected %>% 
+  scater::runPCA(subset_row = universe,
+                 BSPARAM = BiocSingular::RandomParam(),
+                 # BPPARAM = bpparam,
+                 exprs_values = "logcounts"
+                 )
+toc()
+
+pcs <- uncorrected %>% reducedDim()
+choices <- pcs %>% getClusteredPCs()
+val <- metadata(choices)$chosen
+reducedDim(uncorrected, "PCA_clust") <- pcs[, 1:val]
+
+# We use graph-based clustering on the components to obtain a summary of the population structure.
+snn_gr <- uncorrected %>% buildSNNGraph(use.dimred = "PCA_clust")
+clusters <- igraph::cluster_walktrap(snn_gr)$membership
+tab <- table(Cluster = clusters, Batch = uncorrected$batch)
+tab
+
+# We can also visualize the corrected coordinates using a t-SNE plot
+set.seed(123)
+uncorrected <- uncorrected %>% runTSNE(dimred = "PCA_clust")
+tsne_uncorrected <- uncorrected %>% plotTSNE(colour_by = "batch")
+uncorrected <- uncorrected %>% runUMAP(dimred = "PCA_clust")
+set.seed(123)
+umap_uncorrected <- uncorrected %>% plotUMAP(colour_by = "batch")
+
+cowplot::plot_grid(uncorrected %>% 
+                     plotTSNE(colour_by = "batch") + 
+                     scale_color_discrete(colorRampPalette(RColorBrewer::brewer.pal(name = "Paired", n = 12))(25)) +
+                     ggeasy::easy_all_text_size(size = 20), 
+                   uncorrected %>% 
+                     plotUMAP(colour_by = "batch") + 
+                     scale_color_discrete(colorRampPalette(RColorBrewer::brewer.pal(name = "Paired", n = 12))(25)) +
+                     ggeasy::easy_all_text_size(size = 20)
+                   )
+
+uncorrected %>% qs::qsave(file = paste0(path_to_files, "uncorrected.qs"), nthreads = 50)
+```
+
+# Batch effect removal
+```{r}
+uncorrected <- qs::qread(file = paste0(path_to_files, "uncorrected.qs"), nthreads = 50)
+
+# Fast MNN
+## Performing MNN correction
+set.seed(123)
+mnn_out <- fastMNN(sce_1M_no_doublets, sce_1.5M_no_doublets, d = 50, k = 20, BSPARAM = BiocSingular::RandomParam(deferred = TRUE))
+mnn_out$batch <- mnn_out$batch %>% as.factor() %>% forcats::fct_recode(`1M` = "1", `1.5M` = "2") 
+
+# cluster the PCs
+pcs <- mnn_out %>% reducedDim()
+choices <- pcs %>% getClusteredPCs()
+val <- metadata(choices)$chosen
+reducedDim(mnn_out, "PCA_clust") <- pcs[, 1:val]
+
+
+# mnn_out %>% qs::qsave(file = paste0(path_to_files, "mnn_output.qs"), nthreads = 50)
+# mnn_out <- qs::qread(file = paste0(path_to_files, "mnn_output.qs"), nthreads = 50)
+
+# We cluster on the low-dimensional corrected coordinates to obtain a partitioning of the cells that serves as a proxy for the population structure.
+snn_gr <- mnn_out %>% buildSNNGraph(use.dimred = "corrected")
+clusters_mnn <- igraph::cluster_walktrap(snn_gr)$membership
+# tab_mnn <- table(Cluster = colLabels(uncorrected), Batch = mnn_out$batch)
+tab_mnn <- table(Cluster = clusters_mnn, Batch = mnn_out$batch)
+tab_mnn
+
+set.seed(123)
+mnn_out <- mnn_out %>% runTSNE(dimred = "corrected")
+mnn_out$batch <- factor(mnn_out$batch)
+tsne_corrected <- mnn_out %>% plotTSNE(colour_by = "batch")
+mnn_out %>% plotTSNE(colour_by = I(factor(clusters_mnn)))
+# mnn_out %>% plotTSNE(colour_by = I(colLabels(uncorrected)))
+# uncorrected %>% plotTSNE(colour_by = I(colLabels(uncorrected)))
+
+set.seed(123)
+mnn_out <- mnn_out %>% runUMAP(dimred = 'corrected', n_neighbors = 20)
+umap_corrected <- mnn_out %>% plotUMAP(colour_by = "batch")
+mnn_out %>% plotUMAP(colour_by = I(factor(clusters_mnn)))
+# mnn_out %>% plotUMAP(colour_by = I(colLabels(uncorrected)))
+# uncorrected %>% plotUMAP(colour_by = I(colLabels(uncorrected)))
+
+# colLabels(mnn_out) <- colLabels(uncorrected)
+# mnn_out$annotation <- uncorrected$annotation
+
+plot_grid(tsne_uncorrected, tsne_corrected, umap_uncorrected, umap_corrected, ncol = 2)
+
+# mnn_out %>% qs::qsave(file = paste0(path_to_files, "mnn_output.qs"), nthreads = 50)
+# mnn_out <- qs::qread(file = paste0(path_to_files, "mnn_utput.qs"), nthreads = 50)
+
+pca_data_mnn <- prcomp(x = mnn_out@assays@data$reconstructed %>% t(), center = TRUE) 
+batch_silhouette_mnn <- batch_sil(
+  pca.data = pca_data_mnn, 
+  batch = as.numeric(mnn_out$batch %>% dplyr::recode("1M" = "1", "1.5M" = "2")))
+
+colData(mnn_out) <- colData(uncorrected)
+mnn_out@assays@data$logcounts <- uncorrected@assays@data$logcounts
+mnn_out@assays@data$counts <- uncorrected@assays@data$counts
+
+mnn_out %>% qs::qsave(file = paste0(path_to_files, "mnn_output.qs"), nthreads = 50)
+
+cowplot::plot_grid(mnn_out %>% 
+                     plotTSNE(colour_by = "batch") + 
+                     scale_color_discrete(colorRampPalette(RColorBrewer::brewer.pal(name = "Paired", n = 12))(25)) +
+                     ggeasy::easy_all_text_size(size = 20),
+                   mnn_out %>% 
+                     plotUMAP(colour_by = "batch") + 
+                     scale_color_discrete(colorRampPalette(RColorBrewer::brewer.pal(name = "Paired", n = 12))(25)) +
+                     ggeasy::easy_all_text_size(size = 20)
+                   )
+
+cowplot::plot_grid(mnn_out %>% 
+                     plotTSNE(colour_by = "cell_type") + 
+                     scale_color_discrete(colorRampPalette(RColorBrewer::brewer.pal(name = "Paired", n = 12))(25)) +
+                     ggeasy::easy_all_text_size(size = 20),
+                   mnn_out %>% 
+                     plotUMAP(colour_by = "cell_type") + 
+                     scale_color_discrete(colorRampPalette(RColorBrewer::brewer.pal(name = "Paired", n = 12))(25)) +
+                     ggeasy::easy_all_text_size(size = 20)
+                   )
+
+# mnn_out %>% qs::qsave(file = paste0(path_to_files, "mnn_output.qs"), nthreads = 50)
+mnn_out <- qs::qread(file = paste0(path_to_files, "mnn_output.qs"), nthreads = 50)
+```
+
+# Plot gene expression
+```{r}
+uncorrected <- qs::qread(file = paste0(path_to_files, "uncorrected.qs"), nthreads = 50)
+mnn_out <- qs::qread(file = paste0(path_to_files, "mnn_output.qs"), nthreads = 50)
+
+
+max_expr <- uncorrected@assays@data$logcounts[c("Fgf20", "Fgf16", "Fgf9"), ] %>% as.data.frame() %>% rownames_to_column(var = "gene") %>% pivot_longer(cols = 2:ncol(.), names_to = "cell", values_to = "logcounts") %>% pull(logcounts) %>% max()
+
+gene_tsne_plots <- function(gene, uncorrected_sce, batch_corrected_sce){
+  
+  max_expr <- uncorrected@assays@data$logcounts[gene, ] %>% as.data.frame() %>% rownames_to_column(var = "gene") %>% pivot_longer(cols = 2:ncol(.), names_to = "cell", values_to = "logcounts") %>% pull(logcounts) %>% max() %>% ceiling()
+  
+  tsne_df <- batch_corrected_sce@int_colData@listData$reducedDims$TSNE %>% as.data.frame()
+  gene_expression <- uncorrected_sce@assays@data$logcounts[gene,] %>% as.numeric()
+  #  you can bring forward a dot with a larger value on the scale by adjusting the order in which the dots are drawn.
+  tsne_df <- tsne_df %>% mutate(gene_expression = gene_expression) %>% arrange(gene_expression)
+  
+  tsne_plot <- tsne_df %>% 
+    ggplot(aes(x = V1, y = V2, color = gene_expression)) +
+    geom_point() +
+    # geom_point(aes(size = gene_expression)) +
+    scale_color_gradientn(colors = c("gray85", "orangered1", "darkred"),  
+                           # values = c(0, 1.5, 3),
+                           values = c(0, max_expr/2, max_expr),
+                           # limits = c(0, 3.5), 
+                           limits = c(0, max_expr), 
+                           # breaks = c(0, 1.5, 3),
+                           breaks = c(0, max_expr/2, max_expr),
+                           # labels = c(0, 1.5, 3)
+                           labels = c(0, max_expr/2, max_expr)
+                          ) +
+    theme_bw() + 
+    labs(x = "TSNE 1", y = "TSNE 2", title = gene) +
+    # theme(legend.position = "bottom", legend.box = "horizontal") +
+    # guides(colour = guide_colourbar(title.position = "top", title.hjust = 0.5, title = "logcounts")) +
+    # guides(colour = guide_colourbar(title = "Log-normalized expresison")) +
+    guides(colour = guide_colourbar(title = "Log-normalized \n expression"), size = FALSE) +
+    ggeasy::easy_text_size(size = 30)
+  
+  return(tsne_plot)
+}
+
+Fgf20_gene_expression_tsne <- gene_tsne_plots(uncorrected_sce = uncorrected, batch_corrected_sce = mnn_out, gene = "Fgf20")
+Fgf16_gene_expression_tsne <- gene_tsne_plots(uncorrected_sce = uncorrected, batch_corrected_sce = mnn_out, gene = "Fgf16")
+Fgf9_gene_expression_tsne <- gene_tsne_plots(uncorrected_sce = uncorrected, batch_corrected_sce = mnn_out, gene = "Fgf9")
+
+gene_expression_tsne_fig_legend <- get_legend(Fgf20_gene_expression_tsne)
+
+# Fgf20_gene_expression_tsne %>% ggsave(filename = paste0(path_to_files, "Fgf20_gene_expression_tsne.png"), width = 10, height = 7, dpi = 900)
+# Fgf16_gene_expression_tsne %>% ggsave(filename = paste0(path_to_files, "Fgf16_gene_expression_tsne.png"), width = 10, height = 7, dpi = 900)
+# Fgf9_gene_expression_tsne %>% ggsave(filename = paste0(path_to_files, "Fgf9_gene_expression_tsne.png"), width = 10, height = 7, dpi = 900)
+
+tsne_cell_types <- mnn_out %>% 
+  plotTSNE(colour_by = "cell_type") + 
+  theme_bw() +
+  scale_color_discrete(colorRampPalette(RColorBrewer::brewer.pal(name = "Paired", n = 12))(25)) +
+  ggeasy::easy_all_text_size(size = 30) +
+  scale_color_manual(
+    labels = c("Chondrocyte 1", 
+               "Chondrocyte 2", 
+               "Early mesenchymal progenitor", 
+               "Intermediate mesenchymal progenitor", 
+               "Lineage comitted progenitors", 
+               "Late mesenchymal progenitor", 
+               "Marrow adipogenic lineage precursor", 
+               "Osteoblast", 
+               "Osteocyte", 
+               "Not yet identified"),    
+    # values = colorRampPalette(RColorBrewer::brewer.pal(n = 8, name = "Dark2"))(9)
+    values = RColorBrewer::brewer.pal(n = 9, name = "Paired")
+    ) +
+  theme(legend.position = "bottom", legend.box = "horizontal") +
+    guides(colour = guide_legend(title.position = "top", title.hjust = 0.5, title = "Cell type", ncol = 2)) +
+    ggeasy::easy_text_size(size = 30)
+
+tsne_cell_types_fig_legend <- get_legend(tsne_cell_types)
+
+# tsne_cell_types %>% ggsave(file = paste0(path_to_files, "Zhong_data_tsne_cell_types_Kadu_pipeline.png"), width = 12, height = 7, dpi = 900)
+
+tsne_grid_with_4_figures <- cowplot::plot_grid(
+  tsne_cell_types + theme(legend.position = "none"), 
+  Fgf20_gene_expression_tsne + theme(legend.position = "none"), 
+  Fgf16_gene_expression_tsne + theme(legend.position = "none"), 
+  Fgf9_gene_expression_tsne + theme(legend.position = "none"), 
+  nrow = 2, 
+  ncol = 2, 
+  align = "vh")
+
+fig_legend <- cowplot::plot_grid(
+  ggdraw(tsne_cell_types_fig_legend),
+  NA,
+  # NA,
+  ggdraw(gene_expression_tsne_fig_legend),
+  ncol = 3, 
+  align = "v"
+)
+
+# tsne_grid_with_4_figures %>% ggsave(file = paste0(path_to_files, "tsne_grid_with_4_figures.png"), width = 30, height = 20, dpi = 900)
+# tsne_grid_with_4_figures %>% ggsave(file = paste0(path_to_files, "tsne_grid_with_4_figures.svg"), width = 30, height = 20, dpi = 900)
+
+fig_1 <- cowplot::plot_grid(
+  tsne_grid_with_4_figures,
+  ggdraw(tsne_cell_types_fig_legend), 
+  nrow = 2,
+  rel_heights = c(0.8, 0.2)
+)
+
+fig_2 <- cowplot::plot_grid(
+  fig_1,
+  ggdraw(gene_expression_tsne_fig_legend), 
+  ncol = 2,
+  rel_heights = c(0.9, 0.1),
+  plot_margin = unit(c(0.0, 0.0, 0.0, 0.0), "cm")
+)
+
+library(aplot)
+# from aplot
+# figure_1 <- tsne_grid_with_4_figures %>%   
+#   insert_right(plot = ggdraw(gene_expression_tsne_fig_legend), width = 1/20) %>% 
+#   insert_bottom(plot = ggdraw(tsne_cell_types_fig_legend), height = 1/20) 
+
+fig_2 <- fig_1 %>%   
+  insert_right(plot = ggdraw(gene_expression_tsne_fig_legend), width = 1/6) 
+
+fig_2 %>% ggsave(file = paste0(path_to_files, "tsne_grid_with_4_figures_v2.svg"), width = 25, height = 20, dpi = 900)
+# fig_2 %>% ggsave(file = paste0(path_to_files, "tsne_grid_with_4_figures_dot_size_v2.svg"), width = 25, height = 20, dpi = 900)
+
+fig_2 %>% ggsave(file = paste0(path_to_files, "tsne_grid_with_4_figures_v3.svg"), width = 25, height = 20, dpi = 900)
+fig_2 %>% ggsave(file = paste0(path_to_files, "tsne_grid_with_4_figures_v3.png"), width = 25, height = 20, dpi = 900)
+
+
+
+
+# CH1: chondrocyte 1
+# CH2: chondrocyte 2
+
+# IMP: intermediate mesenchymal progenitor
+
+# EMP: early mesenchymal progenitor
+# LMP: late mesenchymal progenitor
+
+# LCP: lineage comitted progenitors
+# MALPs: marrow adipogenic lineage precursors
+```
+
+
+# Rhbdd1 expression, request STA-2023-057
+```{r}
+max_expr <- uncorrected@assays@data$logcounts[c("Rhbdd1"), ] %>% as.data.frame() %>% rownames_to_column(var = "gene") %>% pivot_longer(cols = 2:ncol(.), names_to = "cell", values_to = "logcounts") %>% pull(logcounts) %>% max()
+
+Rhbdd1_gene_expression_tsne <- gene_tsne_plots(uncorrected_sce = uncorrected, batch_corrected_sce = mnn_out, gene = "Rhbdd1")
+
+Rhbdd1_gene_expression_tsne %>% ggsave(file = paste0(path_to_files, "Rhbdd1_gene_expression_tsne.svg"), width = 12, height = 8, dpi = 900)
+```
+
+
+# Jana's request, STA-2023-058
+```{r}
+genes <- c("Fam83h", "Notch1", "Krt8", "Notch3", "Dll4", "Hes1", "Hey1", "Hes6", "Cdh5", "Cdh1", "Cxcl12", "Bglap", "Lepr", "Vcam1", "Ptprc", "Pecam1", "S100a4", "Acta2")
+
+genes <- genes %>% sort()
+
+max_expr <- uncorrected@assays@data$logcounts[genes, ] %>% as.data.frame() %>% rownames_to_column(var = "gene") %>% pivot_longer(cols = 2:ncol(.), names_to = "cell", values_to = "logcounts") %>% pull(logcounts) %>% max() %>% ceiling()
+
+purrr::map(seq_along(genes), function(i){
+  print(genes[i])
+  gene_expression_tsne <- gene_tsne_plots(uncorrected_sce = uncorrected, batch_corrected_sce = mnn_out, gene = genes[i])
+  gene_expression_tsne %>% ggsave(file = paste0(path_to_files, "Jana_request_STA-2023-058/", genes[i], "_gene_expression_tsne.svg"), width = 12, height = 8, dpi = 900)
+})
+
+
+
+for(i in 1:length(genes)) {
+  
+  print(genes[i])
+  
+    violin_plot <- mnn_out %>% 
+      plotExpression(x = "cell_type", features = genes[i],  colour_by = "cell_type") +
+      theme_bw() +
+      theme(axis.text.x = element_blank()) +
+      ggeasy::easy_all_text_size(size = 20) +
+      guides(color = guide_legend("Cell type")) +
+      labs(x = "", y = "Normalized gene expression") +
+      ggeasy::easy_legend_at(to = "bottom") 
+    
+    violin_plot %>% ggsave(filename = paste0(path_to_files, "Jana_request_STA-2023-058/", genes[i], "_violin_plot.png"), width = 10, height = 5)  
+  
+}
+
+
+```
+
+
+
+
+
+
+
+
+# Load data
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE128423
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE108892
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE145477
+```{r}
+GSM4318799_1M_df <- vroom::vroom(file = paste0(path_to_files, "GSM4318799_1M_matrix.txt"), delim = " ", num_threads = 50)
+
+col_names <- colnames(GSM4318799_1M_df)
+GSM4318799_1M_df <- GSM4318799_1M_df %>% 
+  separate(col = 5745, sep = " ", into = c("cell_5745", "cell_5746")) %>% 
+  purrr::set_names(c("gene", col_names))
+
+GSM4318799_1M_df <- GSM4318799_1M_df %>% 
+  mutate(gene = gene %>% make.unique) %>% 
+  column_to_rownames(var = "gene") %>% 
+  mutate_all(as.numeric) %>% 
+  mutate_all(replace_na, replace = 0)
+
+GSM4318799_1M_df[, ncol(GSM4318799_1M_df)]
+
+GSM4318800_1.5M_df <- vroom::vroom(file = paste0(path_to_files, "GSM4318800_1.5M_matrix.txt"), delim = " ", num_threads = 50)
+
+col_names <- colnames(GSM4318800_1.5M_df)
+GSM4318800_1.5M_df <- GSM4318800_1.5M_df %>% 
+  separate(col = 5745, sep = " ", into = c("cell_5745", "cell_5746")) %>% 
+  purrr::set_names(c("gene", col_names))
+
+GSM4318800_1.5M_df <- GSM4318800_1.5M_df %>% 
+  mutate(gene = gene %>% make.unique) %>% 
+  column_to_rownames(var = "gene") %>% 
+  mutate_all(as.numeric) %>% 
+  mutate_all(replace_na, replace = 0)
+
+GSM4318800_1.5M_df[, ncol(GSM4318800_1.5M_df)]
+
+GSM4318801_3M_df <- vroom::vroom(file = paste0(path_to_files, "GSM4318801_3M_matrix.txt"), delim = " ", num_threads = 50)
+
+col_names <- colnames(GSM4318801_3M_df)
+GSM4318801_3M_df <- GSM4318801_3M_df %>% 
+  separate(col = 4516, sep = " ", into = c("cell_4515", "cell_4516")) %>% 
+  purrr::set_names(c("gene", col_names))
+
+GSM4318801_3M_df <- GSM4318801_3M_df %>% 
+  mutate(gene = gene %>% make.unique) %>% 
+  column_to_rownames(var = "gene") %>% 
+  mutate_all(as.numeric) %>% 
+  mutate_all(replace_na, replace = 0)
+
+GSM4318801_3M_df[, ncol(GSM4318801_3M_df)]
+
+GSM4318802_16M_df <- vroom::vroom(file = paste0(path_to_files, "GSM4318802_16M_matrix.txt"), delim = " ", num_threads = 50)
+
+col_names <- colnames(GSM4318802_16M_df)
+GSM4318802_16M_df <- GSM4318802_16M_df %>% 
+  separate(col = 5745, sep = " ", into = c("cell_5745", "cell_5746")) %>% 
+  purrr::set_names(c("gene", col_names))
+
+GSM4318802_16M_df <- GSM4318802_16M_df %>% 
+  mutate(gene = gene %>% make.unique) %>% 
+  column_to_rownames(var = "gene") %>% 
+  mutate_all(as.numeric) %>% 
+  mutate_all(replace_na, replace = 0)
+
+GSM4318802_16M_df[, ncol(GSM4318802_16M_df)]
+```
+
+```{r}
+# We constructed 4 batches of single cell libraries for sequencing: endosteal Td+bone marrow cells from 1-month-old (n = 2), 1.5-month-old (n = 3), 3-month-old (n = 3) and 16-month-old (n = 3) male Col2:Td mice. 
+
+GSM4318799_1M <- CreateSeuratObject(counts = GSM4318799_1M_df, project = "Zhong_1M", min.cells = 3, min.features = 200)
+
+GSM4318800_1.5M <- CreateSeuratObject(counts = GSM4318800_1.5M_df, project = "Zhong_1.5M", min.cells = 3, min.features = 200)
+
+GSM4318802_16M <- CreateSeuratObject(counts = GSM4318802_16M_df, project = "Zhong_16M", min.cells = 3, min.features = 200)
+
+GSM4318801_3M <- CreateSeuratObject(counts = GSM4318801_3M_df, project = "Zhong_3M", min.cells = 3, min.features = 200)
+```
+
+# QC/ Amount of MT genes
+```{r}
+grep(pattern = "^Mt-", x = rownames(GSM4318802_16M@assays$RNA@counts), value = TRUE)
+rownames(GSM4318799_1M@assays$RNA@counts)[rownames(GSM4318799_1M@assays$RNA@counts) %>% str_which(pattern = "Mt") ]
+rownames(GSM4318800_1.5M@assays$RNA@counts)[rownames(GSM4318800_1.5M@assays$RNA@counts) %>% str_which(pattern = "Mt") ]
+rownames(GSM4318801_3M@assays$RNA@counts)[rownames(GSM4318801_3M@assays$RNA@counts) %>% str_which(pattern = "Mt") ]
+rownames(GSM4318802_16M@assays$RNA@counts)[rownames(GSM4318802_16M@assays$RNA@counts) %>% str_which(pattern = "Mt") ]
+
+PercentageFeatureSet(GSM4318799_1M, pattern = "^Mt") %>% arrange(desc(nCount_RNA)) -> GSM4318799_1M$percent_MT
+PercentageFeatureSet(GSM4318800_1.5M, pattern = "^Mt") %>% arrange(desc(nCount_RNA)) -> GSM4318800_1.5M$percent_MT
+PercentageFeatureSet(GSM4318801_3M, pattern = "^Mt") %>% arrange(desc(nCount_RNA)) -> GSM4318801_3M$percent_MT
+PercentageFeatureSet(GSM4318802_16M, pattern = "^Mt") %>% arrange(desc(nCount_RNA)) -> GSM4318802_16M$percent_MT
+
+VlnPlot(GSM4318799_1M, features = c("nCount_RNA"))
+VlnPlot(GSM4318800_1.5M, features = c("nCount_RNA"))
+VlnPlot(GSM4318801_3M, features = c("nCount_RNA"))
+VlnPlot(GSM4318802_16M, features = c("nCount_RNA"))
+```
+
+# QC/ Amount of MT genes
+```{r}
+# cells with poor quality (genes > 6000, genes < 200, or >5% genes mapping to mitochondrial genome) were excluded.
+subset(
+  GSM4318799_1M,
+  nFeature_RNA > 200 | 
+    nFeature_RNA < 6000 | 
+    percent_MT < 5 
+) -> GSM4318799_1M
+
+subset(
+  GSM4318800_1.5M,
+  nFeature_RNA > 200 | 
+    nFeature_RNA < 6000 | 
+    percent_MT < 5 
+) -> GSM4318800_1.5M
+
+subset(
+  GSM4318801_3M,
+  nFeature_RNA > 200 | 
+    nFeature_RNA < 6000 | 
+    percent_MT < 5 
+) -> GSM4318801_3M
+
+subset(
+  GSM4318802_16M,
+  nFeature_RNA > 200 | 
+    nFeature_RNA < 6000 | 
+    percent_MT < 5 
+) -> GSM4318802_16M
+```
+
+
+# Log-normalize
+```{r}
+# Expression was natural log transformed and normalized for scaling the sequencing depth to a total of 1 × 104 molecules per cell
+GSM4318799_1M <- Seurat::NormalizeData(
+  object = GSM4318799_1M, 
+  normalization.method = "LogNormalize", 
+  scale.factor = 10000
+  )
+
+GSM4318800_1.5M <- Seurat::NormalizeData(
+  object = GSM4318800_1.5M, 
+  normalization.method = "LogNormalize", 
+  scale.factor = 10000
+  )
+
+GSM4318801_3M <- Seurat::NormalizeData(
+  object = GSM4318801_3M, 
+  normalization.method = "LogNormalize", 
+  scale.factor = 10000
+  )
+
+GSM4318802_16M <- Seurat::NormalizeData(
+  object = GSM4318802_16M, 
+  normalization.method = "LogNormalize", 
+  scale.factor = 10000
+  )
+```
+
+# Scale data
+```{r}
+# followed by regressing out the number of UMIs and percent mitochondrial genes using Seurat V2
+GSM4318799_1M <- Seurat::ScaleData(
+  object = GSM4318799_1M,
+  vars.to.regress = c("nFeature_RNA", "percent_MT")
+  )
+
+GSM4318800_1.5M <- Seurat::ScaleData(
+  object = GSM4318800_1.5M,
+  vars.to.regress = c("nFeature_RNA", "percent_MT")
+  )
+
+GSM4318801_3M <- Seurat::ScaleData(
+  object = GSM4318801_3M,
+    vars.to.regress = c("nFeature_RNA", "percent_MT")
+  )
+
+GSM4318802_16M <- Seurat::ScaleData(
+  object = GSM4318802_16M,
+    vars.to.regress = c("nFeature_RNA", "percent_MT")
+  )
+```
+
+```{r}
+# For the integrated dataset, canonical component analysis (CCA) (Butler et al., 2018) was performed using the union of the top 2000 genes with the highest dispersion from both datasets and to determine the common sources of variation between 1- and 1.5 month datasets.
+
+GSM4318799_1M <- FindVariableFeatures(
+  object = GSM4318799_1M, 
+  selection.method = "dispersion", 
+  nfeatures = 2000
+  )
+
+GSM4318800_1.5M <- FindVariableFeatures(
+  object = GSM4318800_1.5M, 
+  selection.method = "dispersion", 
+  nfeatures = 2000
+  ) 
+
+GSM4318801_3M <- FindVariableFeatures(
+  object = GSM4318801_3M,
+  selection.method = "dispersion",
+  nfeatures = 2000
+  )
+
+GSM4318802_16M <- FindVariableFeatures(
+  object = GSM4318802_16M,
+  selection.method = "dispersion",
+  nfeatures = 2000
+  )
+```
+
+# Integrate 1M and 1.5M datasets
+# Canonical Component Analysis
+```{r}
+# union_top_2000_genes <- union(VariableFeatures(var_features_1M), VariableFeatures(GSM4318800_1.5M))
+
+# A CCA dimensional reduction was subsequently generated on the basis of the first 30 canonical correlation vectors.
+
+sc_1M <- Seurat::RunCCA(
+  object1 = GSM4318799_1M, 
+  object2 = GSM4318800_1.5M, 
+  num.cc = 30
+  )
+
+sc_1M <- FindVariableFeatures(object = sc_1M, 
+                                      selection.method = "dispersion", 
+                                      nfeatures = 2000
+                                      ) 
+```
+
+# PCA
+```{r}
+sc_1M <- sc_1M %>% Seurat::RunPCA()
+sc_3M <- GSM4318801_3M %>% Seurat::RunPCA()
+sc_16M <- GSM4318802_16M %>% Seurat::RunPCA()
+
+sc_1M <- sc_1M %>% JackStraw()
+sc_3M <- sc_3M %>% JackStraw()
+sc_16M <- sc_16M %>% JackStraw()
+```
+
+# TSNE
+```{r}
+# T-distributed stochastic neighbor embedding (tSNE) plots were used to visualize the data based on the CCA alignment. 
+
+sc_1M <- sc_1M %>% Seurat::RunTSNE()
+sc_3M <- sc_3M %>% Seurat::RunTSNE()
+sc_16M <- sc_16M %>% Seurat::RunTSNE()
+```
+
+# UMAP
+```{r}
+# sc_1M <- sc_1M %>% Seurat::RunUMAP()
+# sc_3M <- sc_3M %>% Seurat::RunUMAP()
+# sc_16M <- sc_16M %>% Seurat::RunUMAP()
+```
+
+```{r}
+sc_1M %>% TSNEPlot()
+sc_3M %>% TSNEPlot()
+sc_16M %>% TSNEPlot()
+```
+# saving datasets
+```{r}
+# sc_1M %>% qs::qsave(file = paste0(path_to_files, "sc_1M.qs"), nthreads = 50)
+# sc_3M %>% qs::qsave(file = paste0(path_to_files, "sc_3M.qs"), nthreads = 50)
+# sc_16M %>% qs::qsave(file = paste0(path_to_files, "sc_16M.qs"), nthreads = 50)
+```
+
+
+```{r}
+# Anchors from different dataset were defined using the FindIntegrationAnchors function, then use these anchors to integrate all datasets together with IntegrateData. This integrated data was further analyzed and subclustered for mesenchymal lineage cells as described above
+
+integration_anchors <- FindIntegrationAnchors(object.list = list(sc_1M, sc_3M, sc_16M))
+
+integrated_dataset <- IntegrateData(anchorset = integration_anchors)
+
+# integrated_dataset@assays$integrated@counts@Dimnames <- integrated_dataset@assays$integrated@data@Dimnames
+ 
+integrated_dataset <- Seurat::ScaleData(
+  object = integrated_dataset,
+    vars.to.regress = c("nFeature_RNA", "percent_MT")
+  )
+
+integrated_dataset <- integrated_dataset %>% Seurat::RunPCA()
+integrated_dataset <- integrated_dataset %>% Seurat::JackStraw()
+integrated_dataset <- integrated_dataset %>% Seurat::RunTSNE()
+# integrated_dataset <- integrated_dataset %>% Seurat::RunUMAP()
+integrated_dataset %>% TSNEPlot()
+```
+
+# save integrated dataset
+```{r}
+integrated_dataset %>% qs::qsave(file = paste0(path_to_files,  "integrated_dataset.qs"), nthreads = 50)
+```
+
+# load datasets
+```{r}
+sc_1M <- qs::qread(file = paste0(path_to_files, "sc_1M.qs"), nthreads = 50)
+sc_3M <- qs::qread(file = paste0(path_to_files, "sc_3M.qs"), nthreads = 50)
+sc_16M <- qs::qread(file = paste0(path_to_files, "sc_16M.qs"), nthreads = 50)
+integrated_dataset <- qs::qread(file = paste0(path_to_files, "integrated_dataset.qs"), nthreads = 50)
+```
+
+# Add information on dataset to cells
+```{r}
+sc_1M@meta.data
+sc_1M@reductions$tsne@cell.embeddings <- sc_1M@reductions$tsne@cell.embeddings %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "cell") %>% 
+  mutate(cell = cell %>% str_replace(pattern = "(.*)_1$", replacement = "1M__\\1")) %>% 
+  mutate(cell = cell %>% str_replace(pattern = "(.*)_2$", replacement = "1.5M__\\1")) %>% 
+  as.matrix()
+
+sc_3M@reductions$tsne@cell.embeddings <- sc_3M@reductions$tsne@cell.embeddings %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "cell") %>% 
+  mutate(cell = paste0("3M__", cell)) 
+
+sc_16M@reductions$tsne@cell.embeddings <- sc_16M@reductions$tsne@cell.embeddings %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "cell") %>% 
+  mutate(cell = paste0("16M__", cell)) 
+```
+
+
+# function plot_tsne_gene_expression
+```{r plot_tsne_gene_expression}
+plot_tsne_gene_expression <- function(seurat_object, gene){
+  tsne_df <- seurat_object@reductions$tsne@cell.embeddings %>% as.data.frame()
+  expression_df <- seurat_object@assays$RNA@data %>% as.data.frame()
+  gene_expression <- expression_df[gene,] %>% as.numeric()
+  tsne_df %>% 
+    ggplot(aes(x = tSNE_1, y = tSNE_2, color = gene_expression)) +
+    geom_point() +
+    scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+    theme_bw() + 
+    labs(x = "TSNE 1", y = "TSNE 2", title = gene) 
+}
+```
+
+# tsne gene expression
+# sc_1M
+```{r}
+sc_1M_Fdf20_expression_fig <- plot_tsne_gene_expression(seurat_object = sc_1M, gene = "Fgf20")
+
+sc_1M_Fdf20_expression_fig %>% ggsave(file = "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNAseq_Zhong_et_al/sc_1M_Fdf20_expression_fig.png", device = "png", width = 10, height = 7, dpi = 900)
+  
+sc_3M_Fdf20_expression_fig <- plot_tsne_gene_expression(seurat_object = sc_1M, gene = "Fgf9") 
+
+sc_1M_Fdf20_expression_fig %>% ggsave(file = "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNAseq_Zhong_et_al/sc_1M_Fdf9_expression_fig.png", device = "png", width = 10, height = 7, dpi = 900)
+
+sc_16M_Fdf20_expression_fig <- plot_tsne_gene_expression(seurat_object = sc_1M, gene = "Fgf16") 
+
+sc_1M_Fdf20_expression_fig %>% ggsave(file = "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNAseq_Zhong_et_al/sc_1M_Fdf16_expression_fig.png", device = "png", width = 10, height = 7, dpi = 900)
+```
+
+
+# tsne gene expression
+# sc_3M
+```{r}
+plot_tsne_gene_expression(seurat_object = sc_3M, gene = "Fgf20")
+
+plot_tsne_gene_expression(seurat_object = sc_3M, gene = "Fgf9") %>% ggsave(file = "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNAseq_Zhong_et_al/sc_3M_Fdf9_expression_fig.png", device = "png", width = 10, height = 7, dpi = 900)
+
+plot_tsne_gene_expression(seurat_object = sc_3M, gene = "Fgf16") %>% ggsave(file = "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNAseq_Zhong_et_al/sc_3M_Fdf16_expression_fig.png", device = "png", width = 10, height = 7, dpi = 900)
+```
+
+# tsne gene expression
+# sc_16M
+```{r}
+plot_tsne_gene_expression(seurat_object = sc_16M, gene = "Fgf20")
+
+plot_tsne_gene_expression(seurat_object = sc_16M, gene = "Fgf9") %>% ggsave(file = "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNAseq_Zhong_et_al/sc_16M_Fdf9_expression_fig.png", device = "png", width = 10, height = 7, dpi = 900)
+
+plot_tsne_gene_expression(seurat_object = sc_16M, gene = "Fgf16") %>% ggsave(file = "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/scRNAseq_Zhong_et_al/sc_16M_Fdf16_expression_fig.png", device = "png", width = 10, height = 7, dpi = 900)
+```
+
+# tsne gene expression
+# integrated dataset
+```{r}
+plot_tsne_gene_expression_integrated <- function(seurat_object, gene){
+  tsne_df <- seurat_object@reductions$tsne@cell.embeddings %>% as.data.frame()
+  expression_df <- seurat_object@assays$integrated@data %>% as.data.frame()
+  gene_expression <- expression_df[gene,] %>% as.numeric()
+  tsne_df %>% 
+    ggplot(aes(x = tSNE_1, y = tSNE_2, color = gene_expression)) +
+    geom_point() +
+    scale_color_continuous(low = "grey", high = "red", guide = "colourbar", aesthetics = "colour") +
+    theme_bw() + 
+    labs(x = "TSNE 1", y = "TSNE 2", title = gene) 
+}
+
+plot_tsne_gene_expression_integrated(seurat_object = integrated_dataset, gene = "Fgf20")
+
+plot_tsne_gene_expression_integrated(seurat_object = integrated_dataset, gene = "Fgf9")
+plot_tsne_gene_expression_integrated(seurat_object = integrated_dataset, gene = "Fgf16")
+```
+
+# clusterng
+```{r}
+library(scater)
+
+# 1M
+sc_1M <- sc_1M %>% FindNeighbors(dims = 1:10)
+sc_1M <- sc_1M %>% Seurat::FindClusters()
+
+markers_1M_list <- purrr::map(seq_along(unique(sc_1M@meta.data$seurat_clusters)), function(i){
+  print(i)
+  sc_1M %>% Seurat::FindMarkers(ident.1 = i)
+  })
+# 
+# # 3M
+# sc_3M <- sc_3M %>% FindNeighbors(dims = 1:10)
+# sc_3M <- sc_3M %>% Seurat::FindClusters()
+# 
+# markers_3M_list <- purrr::map(seq_along(unique(sc_3M@meta.data$seurat_clusters)), function(i){
+#   print(i)
+#   sc_3M %>% Seurat::FindMarkers(ident.1 = i)
+#   })
+# 
+# # 16M
+# sc_16M <- sc_16M %>% FindNeighbors(dims = 1:10)
+# sc_16M <- sc_16M %>% Seurat::FindClusters()
+# 
+# markers_16M_list <- purrr::map(seq_along(unique(sc_16M@meta.data$seurat_clusters)), function(i){
+#   print(i)
+#   sc_16M %>% Seurat::FindMarkers(ident.1 = i)
+#   })
+
+# integrated_dataset
+integrated_dataset <- integrated_dataset %>% FindNeighbors(dims = 1:10)
+integrated_dataset <- integrated_dataset %>% Seurat::FindClusters()
+
+ # using the FindMarkers to identify differentially expressed genes (DEGs), Cluster specific markers for each cluster, relative to the remaining population,
+markers_integrated_list <- purrr::map(seq_along(unique(integrated_dataset@meta.data$seurat_clusters)), function(i){
+  print(i)
+  integrated_dataset %>% Seurat::FindMarkers(ident.1 = (i-1))
+  }) 
+
+markers_integrated_list %>% qs::qsave(file = paste0(path_to_files, "markers_integrated_list.qs"), nthreads = 7)
+
+markers_integrated_list <- markers_integrated_list %>% purrr::map(rownames_to_column, var = "gene")
+
+markers_integrated_list %>% purrr::map(dplyr::filter, gene %in% c("Has1", "Galnt5", "Cspg2", "Col14a1"))
+```
+
+
+

@@ -1,0 +1,2082 @@
+---
+title: "Automated_analysis_immunology_data"
+author: "Carlos Eduardo Madureira Trufen"
+date: "5/20/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r, message=FALSE, warning=FALSE, cache=TRUE}
+library(bestNormalize)
+library(caret)
+library(corrplot)
+library(clusterCrit)
+library(CytoML)
+library(DiffSOM)
+library(doParallel)
+library(EmbedSOM)
+library(FactoMineR)
+library(factoextra)
+library(flowClean)
+library(flowCore)
+library(flowClust)
+library(flowStats)
+library(flowViz)
+library(flowWorkspace)
+library(FlowSOM)
+library(furrr)
+library(ggcyto)
+library(HDclassif)
+library(kohonen)
+library(microbenchmark)
+library(parallel)
+library(parallelMap)
+library(profvis)
+library(RColorBrewer)
+library(Rcpp11)
+library(tictoc)
+library(tidyverse)
+library(yasomi)
+# source("~/PRIMUS/home/trufenc/new_SOM_functions.R")
+source("/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=home/trufenc/new_SOM_functions.R")
+```
+
+```{r}
+scale_to_range_0_1 <- function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+```
+
+
+# function C5.0.graphviz
+<!-- from http://r-project-thanos.blogspot.com/2014/09/plot-c50-decision-trees-in-r.html -->
+```{r}
+C5.0.graphviz <- function(C5.0.model, filename, fontname = "Arial", col.draw = "black",
+                          col.font = "blue", col.conclusion = "lightpink", col.question = "grey78",
+                          shape.conclusion = "box3d", shape.question = "diamond",
+                          bool.substitute = "None", prefix = FALSE, vertical = TRUE) {
+  library(cwhmisc)
+  library(stringr)
+  treeout <- C5.0.model$output
+  treeout <- substr(treeout, cpos(treeout, "Decision tree:", start = 1) + 14, nchar(treeout))
+  treeout <- substr(treeout, 1, cpos(treeout, "Evaluation on training data", start = 1) - 2)
+  variables <- data.frame(matrix(nrow = 500, ncol = 4))
+  names(variables) <- c("SYMBOL", "TOKEN", "TYPE", "QUERY")
+  connectors <- data.frame(matrix(nrow = 500, ncol = 3))
+  names(connectors) <- c("TOKEN", "START", "END")
+  theStack <- data.frame(matrix(nrow = 500, ncol = 1))
+  names(theStack) <- c("ITEM")
+  theStackIndex <- 1
+  currentvar <- 1
+  currentcon <- 1
+  open_connection <- TRUE
+  previousindent <- -1
+  firstindent <- 4
+  substitutes <- data.frame(
+    None = c("= 0", "= 1"), yesno = c("no", "yes"),
+    truefalse = c("false", "true"), TF = c("F", "T")
+  )
+  dtreestring <- unlist(scan(text = treeout, sep = "\n", what = list("character")))
+
+  for (linecount in c(1:length(dtreestring))) {
+    lineindent <- 0
+    shortstring <- str_trim(dtreestring[linecount], side = "left")
+    leadingspaces <- nchar(dtreestring[linecount]) - nchar(shortstring)
+    lineindent <- leadingspaces / 4
+    dtreestring[linecount] <- str_trim(dtreestring[linecount], side = "left")
+    while (!is.na(cpos(dtreestring[linecount], ":   ", start = 1))) {
+      lineindent <- lineindent + 1
+      dtreestring[linecount] <- substr(
+        dtreestring[linecount],
+        ifelse(is.na(cpos(dtreestring[linecount], ":   ", start = 1)), 1,
+          cpos(dtreestring[linecount], ":   ", start = 1) + 4
+        ),
+        nchar(dtreestring[linecount])
+      )
+      shortstring <- str_trim(dtreestring[linecount], side = "left")
+      leadingspaces <- nchar(dtreestring[linecount]) - nchar(shortstring)
+      lineindent <- lineindent + leadingspaces / 4
+      dtreestring[linecount] <- str_trim(dtreestring[linecount], side = "left")
+    }
+    if (!is.na(cpos(dtreestring[linecount], ":...", start = 1))) {
+      lineindent <- lineindent + 1
+    }
+    dtreestring[linecount] <- substr(
+      dtreestring[linecount],
+      ifelse(is.na(cpos(dtreestring[linecount], ":...", start = 1)), 1,
+        cpos(dtreestring[linecount], ":...", start = 1) + 4
+      ),
+      nchar(dtreestring[linecount])
+    )
+    dtreestring[linecount] <- str_trim(dtreestring[linecount])
+    stringlist <- strsplit(dtreestring[linecount], "\\:")
+    stringpart <- strsplit(unlist(stringlist)[1], "\\s")
+    if (open_connection == TRUE) {
+      variables[currentvar, "TOKEN"] <- unlist(stringpart)[1]
+      variables[currentvar, "SYMBOL"] <- paste("node", as.character(currentvar), sep = "")
+      variables[currentvar, "TYPE"] <- shape.question
+      variables[currentvar, "QUERY"] <- 1
+      theStack[theStackIndex, "ITEM"] <- variables[currentvar, "SYMBOL"]
+      theStack[theStackIndex, "INDENT"] <- firstindent
+      theStackIndex <- theStackIndex + 1
+      currentvar <- currentvar + 1
+      if (currentvar > 2) {
+        connectors[currentcon - 1, "END"] <- variables[currentvar - 1, "SYMBOL"]
+      }
+    }
+    connectors[currentcon, "TOKEN"] <- paste(unlist(stringpart)[2], unlist(stringpart)[3])
+    if (connectors[currentcon, "TOKEN"] == "= 0") {
+      connectors[currentcon, "TOKEN"] <- as.character(substitutes[1, bool.substitute])
+    }
+    if (connectors[currentcon, "TOKEN"] == "= 1") {
+      connectors[currentcon, "TOKEN"] <- as.character(substitutes[2, bool.substitute])
+    }
+    if (open_connection == TRUE) {
+      if (lineindent < previousindent) {
+        theStackIndex <- theStackIndex - ((previousindent - lineindent) + 1)
+        currentsymbol <- theStack[theStackIndex, "ITEM"]
+      } else {
+        currentsymbol <- variables[currentvar - 1, "SYMBOL"]
+      }
+    } else {
+      currentsymbol <- theStack[theStackIndex - ((previousindent - lineindent) + 1), "ITEM"]
+      theStackIndex <- theStackIndex - ((previousindent - lineindent))
+    }
+    connectors[currentcon, "START"] <- currentsymbol
+    currentcon <- currentcon + 1
+    open_connection <- TRUE
+    if (length(unlist(stringlist)) == 2) {
+      stringpart2 <- strsplit(unlist(stringlist)[2], "\\s")
+      variables[currentvar, "TOKEN"] <- paste(ifelse((prefix == FALSE), "", "Class"), unlist(stringpart2)[2])
+      variables[currentvar, "SYMBOL"] <- paste("node", as.character(currentvar), sep = "")
+      variables[currentvar, "TYPE"] <- shape.conclusion
+      variables[currentvar, "QUERY"] <- 0
+      currentvar <- currentvar + 1
+      connectors[currentcon - 1, "END"] <- variables[currentvar - 1, "SYMBOL"]
+      open_connection <- FALSE
+    }
+    previousindent <- lineindent
+  }
+  runningstring <- paste("digraph g {", "graph ", sep = "\n")
+  runningstring <- paste(runningstring, ' [rankdir="', sep = "")
+  runningstring <- paste(runningstring, ifelse(vertical == TRUE, "TB", "LR"), sep = "")
+  runningstring <- paste(runningstring, '"]', sep = "")
+  for (lines in c(1:(currentvar - 1))) {
+    runningline <- paste(variables[lines, "SYMBOL"], '[shape="')
+    runningline <- paste(runningline, variables[lines, "TYPE"], sep = "")
+    runningline <- paste(runningline, '" label ="', sep = "")
+    runningline <- paste(runningline, variables[lines, "TOKEN"], sep = "")
+    runningline <- paste(runningline,
+      '" style=filled fontcolor=',
+      sep = ""
+    )
+    runningline <- paste(runningline, col.font)
+    runningline <- paste(runningline, " color=")
+    runningline <- paste(runningline, col.draw)
+    runningline <- paste(runningline, " fontname=")
+    runningline <- paste(runningline, fontname)
+    runningline <- paste(runningline, " fillcolor=")
+    runningline <- paste(
+      runningline,
+      ifelse(variables[lines, "QUERY"] == 0, col.conclusion, col.question)
+    )
+    runningline <- paste(runningline, "];")
+    runningstring <- paste(runningstring, runningline, sep = "\n")
+  }
+  for (lines in c(1:(currentcon - 1))) {
+    runningline <- paste(connectors[lines, "START"], "->")
+    runningline <- paste(runningline, connectors[lines, "END"])
+    runningline <- paste(runningline, '[label="')
+    runningline <- paste(runningline, connectors[lines, "TOKEN"], sep = "")
+    runningline <- paste(runningline, '" fontname=', sep = "")
+    runningline <- paste(runningline, fontname)
+    runningline <- paste(runningline, "];")
+    runningstring <- paste(runningstring, runningline, sep = "\n")
+  }
+  runningstring <- paste(runningstring, "}")
+  cat(runningstring)
+  sink(filename, split = TRUE)
+  cat(runningstring)
+  sink()
+}
+
+```
+
+path to files
+```{r path_to_files, cache=TRUE}
+# path_to_files <- "~/PRIMUS/data/83_BIOINFORMATICS/Carlos"
+path_to_files <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Carlos"
+# path_to_files <- "smb://primus.img.cas.cz/data/83_BIOINFORMATICS/Carlos"
+```
+
+```{r}
+# path_to_control_files_1 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2018/CCP_cohorts_2018_12/2018_12_27_C067/2018_12_27_PA/C067_cA1556_gates"
+# 
+# path_to_control_files_2 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90692"
+# 
+# path_to_control_files_3 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90695"
+# 
+# path_to_ko_files_1 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8038"
+# 
+# path_to_ko_files_2 <- "~/PRIMUS/data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8040"
+```
+
+```{r}
+path_to_control_files_1 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2018/CCP_cohorts_2018_12/2018_12_27_C067/2018_12_27_PA/C067_cA1556_gates"
+
+path_to_control_files_2 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90692"
+
+path_to_control_files_3 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90695"
+
+path_to_ko_files_1 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8038"
+
+path_to_ko_files_2 <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8040"
+```
+
+
+```{r}
+path_to_files <- list(path_to_control_files_1,
+                      path_to_control_files_2,
+                      path_to_control_files_3)
+
+path_to_ko_files <- list(path_to_ko_files_1,
+                           path_to_ko_files_2)
+```
+
+```{r files, cache=TRUE}
+files <- path_to_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+ko_files <- path_to_ko_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+```
+
+```{r file_names, cache=TRUE}
+file_names <- path_to_files %>% purrr::map(list.files, pattern = ".fcs")
+ko_files_names <- path_to_ko_files %>% purrr::map(list.files, pattern = ".fcs")
+```
+
+```{r}
+panel_A_classes <- c(
+  "_clog\\+.fcs",
+  "_clog\\-_cells\\-.fcs",
+  "_S1\\-.fcs",
+  "_dead.fcs",
+  "_S2\\-.fcs",
+  "gdTCR_Eff_Klrg1\\-.fcs",
+  "gdTCR_Eff_Klrg1\\+.fcs",
+  "gdTCR_Res_Klrg1\\-.fcs",
+  "gdTCR_Res_Klrg1\\+.fcs",
+  "gdTCR_neg_Klrg1\\-.fcs",
+  "gdTCR_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  #"_CD5\\+\\-.fcs",
+  #"_CD4\\+ NKT\\+ or CD4\\- NKT\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Tregs_Eff_Klrg1\\-.fcs",
+  "Tregs_Eff_Klrg1\\+.fcs",
+  "Tregs_Res_Klrg1\\-.fcs",
+  "Tregs_Res_Klrg1\\+.fcs",
+  "Tregs_neg_Klrg1\\-.fcs",
+  "Tregs_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices <- purrr::map(seq_along(panel_A_classes), function(i) files[[1]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist()
+files_to_load <- files[[1]][indices]
+files_to_load_names <- file_names[[1]][indices]
+```
+
+# Second class assignment, more refined - gates_c90692
+```{r}
+panel_A_classes_2 <- c(
+  "clog\\-\\-.fcs",
+  "cells\\-.fcs",
+  "S1\\-.fcs",
+  "dead.fcs",
+  "S2\\-.fcs",
+  "gd_Eff_Klrg1\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+.fcs",
+  "gd_Res_Klrg1\\+\\-.fcs",
+  "gd_Res_Klrg1\\+.fcs",
+  "gd_neg_Klrg1\\+\\-.fcs",
+  "gd_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\+\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\+\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Treg_Eff_Klrg1\\+\\-.fcs",
+  "Treg_Eff_Klrg1\\+.fcs",
+  "Treg_Res_Klrg1\\+\\-.fcs",
+  "Treg_Res_Klrg1\\+.fcs",
+  "Treg_neg_Klrg1\\+\\-.fcs",
+  "Treg_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\+\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\+\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\+\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_2 <- purrr::map(seq_along(panel_A_classes_2), function(i) files[[2]] %>% str_which(pattern = panel_A_classes_2[i])) %>% unlist()
+files_to_load_2 <- files[[2]][indices_2]
+files_to_load_names_2 <- file_names[[2]][indices_2]
+
+files_to_load_2[files_to_load_2 %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+files_to_load_2 <- files_to_load_2[!is.na(files_to_load_2)]
+```
+
+# Second class assignment, more refined - gates_c90695
+```{r}
+panel_A_classes_3 <- c(
+  "clog\\-\\-.fcs",
+  "clog\\-_cells\\-.fcs",
+  "S1\\-.fcs",
+  "dead.fcs",
+  "S2\\-.fcs",
+  "gd_Eff_Klrg1\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+.fcs",
+  "gd_Res_Klrg1\\+\\-.fcs",
+  "gd_Res_Klrg1\\+.fcs",
+  "gd_neg_Klrg1\\+\\-.fcs",
+  "gd_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\+\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\+\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Treg_Eff_Klrg1\\+\\-.fcs",
+  "Treg_Eff_Klrg1\\+.fcs",
+  "Treg_Res_Klrg1\\+\\-.fcs",
+  "Treg_Res_Klrg1\\+.fcs",
+  "Treg_neg_Klrg1\\+\\-.fcs",
+  "Treg_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\+\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\+\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\+\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_3 <- purrr::map(seq_along(panel_A_classes_3), function(i) files[[3]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+files_to_load_3 <- files[[3]][indices_3]
+files_to_load_names_3 <- file_names[[3]][indices_3]
+```
+
+All the classes for panel A
+```{r}
+panel_A_classes_v <- c(
+  "clog+",
+  "cells-",
+  "S1-",
+  "dead",
+  "S2-",
+  "gdTCR_Eff_Klrg1-",
+  "gdTCR_Eff_Klrg1+",
+  "gdTCR_Res_Klrg1-",
+  "gdTCR_Res_Klrg1+",
+  "gdTCR_neg_Klrg1-",
+  "gdTCR_neg_Klrg1+",
+  "NK_Eff_Klrg1-",
+  "NK_Eff_Klrg1+",
+  "NK_Res_Klrg1-",
+  "NK_Res_Klrg1+",
+  "NK_neg_Klrg1+-",
+  "NK_neg_Klrg1+",
+  "CD4-NKT_Eff_Klrg1-",
+  "CD4-NKT_Eff_Klrg1+",
+  "CD4-NKT_Res_Klrg1-",
+  "CD4-NKT_Res_Klrg1+",
+  "CD4-NKT_neg_Klrg1-",
+  "CD4-NKT_neg_Klrg1+",
+  "CD4+NKT_Eff_Klrg1-",
+  "CD4+NKT_Eff_Klrg1+",
+  "CD4+NKT_Res_Klrg1-",
+  "CD4+NKT_Res_Klrg1+",
+  "CD4+NKT_neg_Klrg1-",
+  "CD4+NKT_neg_Klrg1+",
+  "DN",
+  "Tregs_Eff_Klrg1-",
+  "Tregs_Eff_Klrg1+",
+  "Tregs_Res_Klrg1-",
+  "Tregs_Res_Klrg1+",
+  "Tregs_neg_Klrg1-",
+  "Tregs_neg_Klrg1+",
+  "Th_Eff_Klrg1-",
+  "Th_Eff_Klrg1+",
+  "Th_Res_Klrg1-",
+  "Th_Res_Klrg1+",
+  "Th_neg_Klrg1-",
+  "Th_neg_Klrg1+",
+  "CD8_Naive_Klrg1-_VM Tcells-",
+  "CD8_Naive_Klrg1-_VM Tcells",
+  "CD8_Naive_Klrg1+_VM Tcells-",
+  "CD8_Naive_Klrg1+_VM Tcells",
+  "CD8_Eff_Klrg1-_VM Tcells-",
+  "CD8_Eff_Klrg1-_VM Tcells",
+  "CD8_Eff_Klrg1+_VM Tcells-",
+  "CD8_Eff_Klrg1+_VM Tcells",
+  "CD8_Res_Klrg1-_VM Tcells-",
+  "CD8_Res_Klrg1-_VM Tcells",
+  "CD8_Res_Klrg1+_VM Tcells-",
+  "CD8_Res_Klrg1+_VM Tcells",
+  "CD8_neg_Klrg1-_VM Tcells-",
+  "CD8_neg_Klrg1-_VM Tcells",
+  "CD8_neg_Klrg1+_VM Tcells-",
+  "CD8_neg_Klrg1+_VM Tcells"
+)
+```
+
+
+
+
+
+```{r}
+ko_indices_1 <- purrr::map(seq_along(panel_A_classes_3), function(i) ko_files[[1]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+ko_files_to_load_1 <- ko_files[[1]][ko_indices_1]
+ko_files_to_load_names_1 <- ko_files_names[[1]][ko_indices_1]
+```
+
+```{r}
+ko_indices_2 <- purrr::map(seq_along(panel_A_classes_3), function(i) ko_files[[2]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+ko_files_to_load_2 <- ko_files[[2]][ko_indices_2]
+ko_files_to_load_names_2 <- ko_files_names[[2]][ko_indices_2]
+```
+
+
+# worflow step - Load fcs files (with filtering, scaling and transforming of data).
+```{r load_fcs_files}
+# 38.832 sec elapsed
+# tic()
+# diff_som <- files_to_load %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = TRUE, toScale = c(1:18), transform = TRUE, toTransform = c(7:18))
+# toc()
+
+tic()
+diff_som_no_scale <- files_to_load %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+toc()
+
+# tic()
+# diff_som_no_scale_no_tranform <- files_to_load %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = FALSE)
+# toc()
+```
+
+
+# Transform data into normally distributed
+```{r}
+# diff_som_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+
+diff_som_df <- diff_som_no_scale$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+
+# diff_som_df <- diff_som_no_scale_no_tranform$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+
+# normally_dstributed <- diff_som_df %>% purrr::map(bestNormalize)
+
+normally_dstributed <- diff_som_df %>% purrr::map(bestNormalize::orderNorm)
+
+# normally_dstributed_df <- purrr::map(seq_along(normally_dstributed), function(i) normally_dstributed[[i]]$x.t) %>% purrr::set_names(colnames(diff_som_df)) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% bind_cols()
+
+normally_dstributed_df <- purrr::map(seq_along(normally_dstributed), function(i) normally_dstributed[[i]]$x.t) %>% purrr::set_names(colnames(diff_som_df)) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols()
+
+diff_som_no_scale$fs$data[, 1:18] <- normally_dstributed_df %>% as.matrix()
+
+diff_som <- diff_som_no_scale
+```
+
+
+```{r manual_gating}
+cell_types <- files_to_load_names %>% str_remove(pattern = ".fcs") %>% str_remove(pattern = "export_Specimen_..._c....._..._..._")
+cell_types_df <- cell_types %>% as.data.frame() %>% rownames_to_column() %>% dplyr::rename("cell_types" = ".", "File" = "rowname") %>% mutate(File = File %>% as.numeric())
+# manual_gating <- facs_clean@exprs %>% as.data.frame() %>% full_join(cell_types_df) %>% na.omit() %>% dplyr::select(cell_types) %>% unlist() %>% as.character() %>% make.names() %>% factor()
+manual_gating <- diff_som$fs$data %>% as.data.frame() %>% full_join(cell_types_df) %>% na.omit() %>% dplyr::select(cell_types) %>% unlist() %>% as.character() %>% factor()
+
+facs_data_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(c(1:18))
+# facs_data_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(c(1, 4, 7:18))
+facs_data_df <- facs_data_df %>% purrr::set_names(str_remove(string = names(facs_data_df), pattern = "FJComp."))
+facs_data_df <- facs_data_df %>% mutate(cell_type = manual_gating)
+```
+
+```{r}
+facs_data_df <- facs_data_df %>% mutate(first_gate = case_when(!(cell_type %in% c("clog+", "clog-_cells-", "S1-", "S2-", "dead")) ~ "live"))
+
+# facs_data_df <- facs_data_df %>% mutate(first_gate = if_else(is.na(first_gate), true = as.character(cell_type), false = first_gate))
+
+facs_data_df <- facs_data_df %>% mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+```
+
+
+
+
+# Workflow step - Apply SOM algorithm
+```{r}
+vesanto_dim <- diff_som$fs$data %>% nrow() %>% sqrt() %>% "*"(5)
+grid_dim <- vesanto_dim %>% sqrt() %>% ceiling() %>% "+"(20)
+
+# 86.334 sec elapsed
+tic()
+reseed()
+ds_step_1_all_features <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = c(1:18), importance = rep(1, 18), nclust = grid_dim*grid_dim, rlen = 5)
+toc()
+
+
+# 43.466 sec elapsed on PC
+tic()
+reseed()
+ds2_clog_cell_singlets_1_2 <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "FJComp.Indo.1..Violet..A"), importance = rep(1, 5), nclust = grid_dim*grid_dim, rlen = 5)
+toc()
+```
+
+# Hierarchical clustering
+```{r}
+ds2_clog_cell_singlets_1_2$map$code %>% as.data.frame() %>% ggplot(aes(x = FSC.A)) + geom_histogram()
+
+ds2_clog_cell_singlets_1_2$map$code %>% as.data.frame() %>% ggplot(aes(x = FSC.H)) + geom_histogram()
+
+ds2_clog_cell_singlets_1_2$map$code %>% as.data.frame() %>% ggplot(aes(x = SSC.A)) + geom_histogram()
+
+ds2_clog_cell_singlets_1_2$map$code %>% as.data.frame() %>% ggplot(aes(x = SSC.W)) + geom_histogram()
+
+ds2_clog_cell_singlets_1_2$map$code %>% as.data.frame() %>% ggplot(aes(x = FJComp.Indo.1..Violet..A)) + geom_histogram()
+
+dendrogram <- ds2_clog_cell_singlets_1_2$map$code %>% dist() %>% hclust()
+```
+
+
+
+
+# What if we transform and scale the SOM weights?
+```{r}
+ds_step_1_all_features$map$codes <- purrr::map(seq_len(ncol(ds_step_1_all_features$map$codes)), function(i) ds_step_1_all_features$map$codes[, i] %>% bestNormalize::orderNorm() %>% .[["x.t"]] %>% scale_to_range_0_1()) %>% purrr::set_names(colnames(ds_step_1_all_features$map$codes)) %>% bind_cols()
+```
+
+
+
+```{r}
+grid_clustering_df_all <- ds_step_1_all_features$map$grid %>% as.data.frame() %>% rownames_to_column() %>% mutate(cluster = ds_step_1_all_features$clust) %>% mutate(rowname = rowname %>% as.numeric()) %>% bind_cols(as.data.frame(ds_step_1_all_features$map$codes))
+
+EmbedSOM_results_df_all <- ds_step_1_all_features$fs$data %>% as.data.frame() %>% mutate(mapping = ds_step_1_all_features$map$mapping[, 1]) %>% left_join(grid_clustering_df_all, by = c("mapping" = "rowname")) %>% mutate(first_gate = facs_data_df$first_gate)
+```
+
+
+```{r}
+grid_clustering_df <- ds2_clog_cell_singlets_1_2$map$grid %>% as.data.frame() %>% rownames_to_column() %>% mutate(cluster = ds2_clog_cell_singlets_1_2$clust) %>% mutate(rowname = rowname %>% as.numeric()) %>% bind_cols(as.data.frame(ds2_clog_cell_singlets_1_2$map$codes))
+
+EmbedSOM_results_df <- ds2_clog_cell_singlets_1_2$fs$data %>% as.data.frame() %>% mutate(mapping = ds2_clog_cell_singlets_1_2$map$mapping[, 1]) %>% left_join(grid_clustering_df, by = c("mapping" = "rowname")) %>% mutate(first_gate = facs_data_df$first_gate)
+
+# EmbedSOM_results_df <- EmbedSOM_results_df %>%
+#   dplyr::mutate(
+#     FSC.A.y = FSC.A.y %>% scale_to_0_1(),
+#     FSC.H.y = FSC.H.y %>% scale_to_0_1(),
+#     SSC.A.y = SSC.A.y %>% scale_to_0_1(),
+#     SSC.W.y = SSC.W.y %>% scale_to_0_1(),
+#     FJComp.Indo.1..Violet..A.y = FJComp.Indo.1..Violet..A.y %>% scale_to_0_1()
+#   )
+```
+
+```{r}
+EmbedSOM_results_df %>% ggplot(aes(x = FSC.A.y)) + geom_histogram()
+
+EmbedSOM_results_df %>% ggplot(aes(x = FSC.H.y)) + geom_histogram()
+
+EmbedSOM_results_df %>% ggplot(aes(x = SSC.A.y)) + geom_histogram()
+
+EmbedSOM_results_df %>% ggplot(aes(x = SSC.W.y)) + geom_histogram()
+
+EmbedSOM_results_df %>% ggplot(aes(x = FJComp.Indo.1..Violet..A.y)) + geom_histogram()
+```
+
+# Importance of features
+```{r}
+library(caret)
+library(C50)
+treeModel <- C5.0(x = facs_data_df %>% dplyr::select(-c(first_gate, cell_type)), y = facs_data_df$first_gate %>% factor(), rules = TRUE)
+C5imp(treeModel, metric = "usage")
+C5imp(treeModel, metric = "splits")
+summary(treeModel)
+# C5.0.graphviz(treeModel, 'c:\\dtreeout.txt', col.question ='cyan')
+
+treeModel_all_from_SOM_step_1 <- C5.0(x = EmbedSOM_results_df_all %>% dplyr::select(dplyr::contains(match = ".y")), y = EmbedSOM_results_df$first_gate %>% factor(), rules = TRUE)
+C5imp(treeModel_all_from_SOM_step_1, metric = "usage")
+C5imp(treeModel_all_from_SOM_step_1, metric = "splits")
+summary(treeModel_all_from_SOM_step_1)
+
+treeModel_from_SOM_step_1 <- C5.0(x = EmbedSOM_results_df %>% dplyr::select(dplyr::contains(match = ".y")), y = EmbedSOM_results_df$first_gate %>% factor(), rules = TRUE)
+C5imp(treeModel_from_SOM_step_1, metric = "usage")
+C5imp(treeModel_from_SOM_step_1, metric = "splits")
+summary(treeModel_from_SOM_step_1)
+# C5.0.graphviz(treeModel_step_1, filename = NULL, col.question ='cyan')
+```
+
+
+
+
+# 5.0 with caret - without SOM - selected features
+```{r}
+library(caret)
+library(C50)
+library(mlbench)
+
+fitControl <- trainControl(
+  method = "cv",
+  number = 10,
+  returnResamp = "all"
+)
+# tunable parameters within caret: trials, model, and winnow.
+# grid <- expand.grid(.winnow = c(TRUE, FALSE), .trials = c(1, 5, 10, 15, 20), .model = "tree")
+grid <- expand.grid(.winnow = c(TRUE, FALSE), .trials = c(1, 5, 10, 15, 20), .model = c("tree", "rules"))
+
+features <- facs_data_df %>% dplyr::select(-c(first_gate, cell_type)) %>% dplyr::select(c(FSC.A, SSC.A, FSC.H, SSC.W, Indo.1..Violet..A))
+classes <- facs_data_df$first_gate %>% factor()
+
+# cl <- makePSOCKcluster(6)
+# registerDoParallel(cl)
+# tic()
+# model <- train(x = features, y = classes, tuneGrid = grid, trControl = fitControl, method = "C5.0", verbose = FALSE)
+# toc()
+# stopCluster(cl)
+# 
+# model
+# summary(model)
+# plot(model)
+
+# The final values used for the model were trials = 20, model = rules and winnow = FALSE.
+# 1365.827 sec elapsed
+# 1302.03 sec elapsed
+# tic()
+# rules_model <- C5.0(x = features, y = classes, trials = 20, rules = TRUE)
+# toc()
+
+# rules_model %>% saveRDS(file = "~/Documents/rules_model_from_data.rds")
+
+cl <- makePSOCKcluster(6)
+registerDoParallel(cl)
+tic()
+rules_model_selected <- C5.0(x = features, y = classes, trials = 20, rules = TRUE)
+tree_model_selected <- C5.0(x = features, y = classes, trials = 20, rules = FALSE)
+toc()
+stopCluster(cl)
+
+# rules_model %>% saveRDS(file = "~/Documents/rules_model_from_data_2020_06_02.rds")
+# tree_model %>% saveRDS(file = "~/Documents/tree_model_from_data_2020_06_02.rds")
+
+mode_selectedl_party <- C50:::as.party.C5.0(tree_model_selected)
+```
+
+# 5.0 with caret - without SOM - all features
+```{r}
+library(caret)
+library(C50)
+library(mlbench)
+
+fitControl <- trainControl(
+  method = "cv",
+  number = 10,
+  returnResamp = "all"
+)
+# tunable parameters within caret: trials, model, and winnow.
+# grid <- expand.grid(.winnow = c(TRUE, FALSE), .trials = c(1, 5, 10, 15, 20), .model = "tree")
+grid <- expand.grid(.winnow = c(TRUE, FALSE), .trials = c(1, 5, 10, 15, 20), .model = c("tree", "rules"))
+
+features <- facs_data_df %>% dplyr::select(-c(first_gate, cell_type))
+classes <- facs_data_df$first_gate %>% factor()
+
+# cl <- makePSOCKcluster(6)
+# registerDoParallel(cl)
+# tic()
+# model <- train(x = features, y = classes, tuneGrid = grid, trControl = fitControl, method = "C5.0", verbose = FALSE)
+# toc()
+# stopCluster(cl)
+# 
+# model
+# summary(model)
+# plot(model)
+
+# The final values used for the model were trials = 20, model = rules and winnow = FALSE.
+# 1365.827 sec elapsed
+# 1302.03 sec elapsed
+# tic()
+# rules_model <- C5.0(x = features, y = classes, trials = 20, rules = TRUE)
+# toc()
+
+# rules_model %>% saveRDS(file = "~/Documents/rules_model_from_data.rds")
+
+cl <- makePSOCKcluster(6)
+registerDoParallel(cl)
+tic()
+rules_model_all <- C5.0(x = features, y = classes, trials = 20, rules = TRUE)
+tree_model_all <- C5.0(x = features, y = classes, trials = 20, rules = FALSE)
+toc()
+stopCluster(cl)
+
+rules_model_all %>% saveRDS(file = "~/Documents/rules_model_all_from_data_2020_06_03.rds")
+tree_model_all %>% saveRDS(file = "~/Documents/tree_model_all_from_data_2020_06_03.rds")
+
+model_all_party <- C50:::as.party.C5.0(tree_model_all)
+```
+
+# 5.0 with caret - with SOM, selected features
+```{r}
+library(caret)
+library(C50)
+library(mlbench)
+
+fitControl <- trainControl(
+  method = "cv",
+  number = 10,
+  returnResamp = "all"
+)
+# tunable parameters within caret: trials, model, and winnow.
+# grid <- expand.grid(.winnow = c(TRUE, FALSE), .trials = c(1, 5, 10, 15, 20), .model = "tree")
+grid <- expand.grid(.winnow = c(TRUE, FALSE), .trials = c(1, 5, 10, 15, 20), .model = c("tree", "rules"))
+
+features_from_SOM <- EmbedSOM_results_df %>% dplyr::select(dplyr::contains(".y"))
+classes <- EmbedSOM_results_df$first_gate %>% factor()
+
+# cl <- makePSOCKcluster(6)
+# registerDoParallel(cl)
+# tic()
+# model_from_SOM <- train(x = features_from_SOM, y = classes, tuneGrid = grid, trControl = fitControl, method = "C5.0", verbose = FALSE)
+# toc()
+# summary(model_from_SOM)
+# plot(model_from_SOM)
+# stopCluster(cl)
+
+# The final values used for the model were trials = 1, model = tree and winnow = TRUE.
+# 2.767 sec elapsed
+cl <- makePSOCKcluster(6)
+registerDoParallel(cl)
+tic()
+rules_boost_from_SOM <- C5.0(x = features_from_SOM, y = classes, trials = 1, rules = TRUE)
+tree_boost_from_SOM <- C5.0(x = features_from_SOM, y = classes, trials = 1, rules = FALSE)
+toc()
+stopCluster(cl)
+
+model_party_from_SOM <- C50:::as.party.C5.0(tree_boost_from_SOM)
+```
+
+
+
+# 5.0 with caret - with SOM, all features
+```{r}
+library(caret)
+library(C50)
+library(mlbench)
+
+fitControl <- trainControl(
+  method = "cv",
+  number = 10,
+  returnResamp = "all"
+)
+# tunable parameters within caret: trials, model, and winnow.
+# grid <- expand.grid(.winnow = c(TRUE, FALSE), .trials = c(1, 5, 10, 15, 20), .model = "tree")
+
+grid <- expand.grid(.winnow = FALSE, .trials = c(1, 5, 10, 15, 20), .model = c("tree", "rules"))
+
+features_from_SOM_all <- EmbedSOM_results_df_all %>% dplyr::select(dplyr::contains(".y"))
+classes <- EmbedSOM_results_df_all$first_gate %>% factor()
+
+# cl <- makePSOCKcluster(6)
+# registerDoParallel(cl)
+# tic()
+# model_from_SOM_all_features <- train(x = features_from_SOM_all, y = classes, tuneGrid = grid, trControl = fitControl, method = "C5.0", verbose = FALSE)
+# toc()
+# summary(model_from_SOM_all_features)
+# plot(model_from_SOM_all_features)
+# stopCluster(cl)
+
+# The final values used for the model were trials = 1, model = tree and winnow = FALSE.
+# 9.32 sec elapsed
+cl <- makePSOCKcluster(6)
+registerDoParallel(cl)
+tic()
+tree_boost_from_SOM_all_features <- C5.0(x = features_from_SOM_all, y = classes, trials = 1, rules = FALSE)
+rules_boost_from_SOM_all_features <- C5.0(x = features_from_SOM_all, y = classes, trials = 1, rules = TRUE)
+toc()
+stopCluster(cl)
+
+model_party_from_SOM_all_features <- C50:::as.party.C5.0(tree_boost_from_SOM_all_features)
+```
+
+
+
+
+
+# worflow step 1 - test - control samples
+```{r load_fcs_files}
+# 38.832 sec elapsed
+# tic()
+# diff_som_test <- files_to_load_2 %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = TRUE, toScale = c(1:18), transform = TRUE, toTransform = c(7:18))
+# toc()
+
+tic()
+diff_som_no_scale_test <- files_to_load_2 %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+toc()
+
+# tic()
+# diff_som_no_scale_no_transform_test <- files_to_load_2 %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = FALSE)
+# toc()
+```
+
+# Transform data into normally distributed
+```{r}
+diff_som_test_df <- diff_som_no_scale_test$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+
+# diff_som_df <- diff_som_no_scale_no_tranform$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+
+# normally_dstributed <- diff_som_df %>% purrr::map(bestNormalize)
+
+normally_dstributed_test <- diff_som_test_df %>% purrr::map(bestNormalize::orderNorm)
+
+normally_dstributed_test_df <- purrr::map(seq_along(normally_dstributed_test), function(i) normally_dstributed_test[[i]]$x.t) %>% purrr::set_names(colnames(diff_som_test_df)) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols()
+
+diff_som_no_scale_test$fs$data[, 1:18] <- normally_dstributed_test_df %>% as.matrix()
+
+diff_som_test <- diff_som_no_scale_test
+```
+
+
+```{r manual_gating}
+cell_types_test <- files_to_load_names_2 %>% str_remove(pattern = ".fcs") %>% str_remove(pattern = "export_Specimen_..._c....._..._..._")
+cell_types_test_df <- cell_types_test %>% as.data.frame() %>% rownames_to_column() %>% dplyr::rename("cell_types" = ".", "File" = "rowname") %>% mutate(File = File %>% as.numeric())
+# manual_gating <- facs_clean@exprs %>% as.data.frame() %>% full_join(cell_types_df) %>% na.omit() %>% dplyr::select(cell_types) %>% unlist() %>% as.character() %>% make.names() %>% factor()
+manual_gating_test <- diff_som_test$fs$data %>% as.data.frame() %>% full_join(cell_types_test_df) %>% na.omit() %>% dplyr::select(cell_types) %>% unlist() %>% as.character() %>% factor()
+
+facs_data_test_df <- diff_som_test$fs$data %>% as.data.frame() %>% dplyr::select(c(1:18))
+# facs_data_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(c(1, 4, 7:18))
+facs_data_test_df <- facs_data_test_df %>% purrr::set_names(str_remove(string = names(facs_data_test_df), pattern = "FJComp."))
+facs_data_test_df <- facs_data_test_df %>% mutate(cell_type = manual_gating_test)
+```
+
+```{r}
+facs_data_test_df <- facs_data_test_df %>% mutate(first_gate = case_when(!(cell_type %in% c("clog+", "clog-_cells-", "S1-", "S2-", "dead")) ~ "live"))
+
+# facs_data_df <- facs_data_df %>% mutate(first_gate = if_else(is.na(first_gate), true = as.character(cell_type), false = first_gate))
+
+facs_data_test_df <- facs_data_test_df %>% mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+```
+
+
+# Workflow step - Apply SOM algorithm
+```{r}
+vesanto_dim_test <- diff_som_test$fs$data %>% nrow() %>% sqrt() %>% "*"(5)
+grid_dim_test <- vesanto_dim_test %>% sqrt() %>% ceiling() %>% "+"(20)
+
+# 144.634 sec elapsed
+tic()
+reseed()
+ds_test_step_1_all_features <- diff_som_test %>% Embed(xdim = grid_dim_test, ydim = grid_dim_test, colsToUse = c(1:18), importance = rep(1, 18), nclust = grid_dim_test*grid_dim_test, rlen = 5)
+toc()
+
+
+# 73.96 sec elapsed on PC
+tic()
+reseed()
+ds2_test_clog_cell_singlets_1_2 <- diff_som_test %>% Embed(xdim = grid_dim_test, ydim = grid_dim_test, colsToUse = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "FJComp.Indo.1..Violet..A"), importance = rep(1, 5), nclust = grid_dim_test*grid_dim_test, rlen = 5)
+toc()
+```
+
+# What if we transform and scale the SOM weights?
+```{r}
+ds_test_step_1_all_features$map$codes <- purrr::map(seq_len(ncol(ds_test_step_1_all_features$map$codes)), function(i) ds_test_step_1_all_features$map$codes[, i] %>% bestNormalize::orderNorm() %>% .[["x.t"]] %>% scale_to_range_0_1()) %>% purrr::set_names(colnames(ds_test_step_1_all_features$map$codes)) %>% bind_cols()
+```
+
+
+
+```{r}
+grid_clustering_test_df_all <- ds_test_step_1_all_features$map$grid %>% as.data.frame() %>% rownames_to_column() %>% mutate(cluster = ds_test_step_1_all_features$clust) %>% mutate(rowname = rowname %>% as.numeric()) %>% bind_cols(as.data.frame(ds_test_step_1_all_features$map$codes))
+
+EmbedSOM_results_test_df_all <- ds_test_step_1_all_features$fs$data %>% as.data.frame() %>% mutate(mapping = ds_test_step_1_all_features$map$mapping[, 1]) %>% left_join(grid_clustering_test_df_all, by = c("mapping" = "rowname")) %>% mutate(first_gate = facs_data_test_df$first_gate)
+```
+
+```{r}
+grid_clustering_test_df <- ds2_test_clog_cell_singlets_1_2$map$grid %>% as.data.frame() %>% rownames_to_column() %>% mutate(cluster = ds2_test_clog_cell_singlets_1_2$clust) %>% mutate(rowname = rowname %>% as.numeric()) %>% bind_cols(as.data.frame(ds2_test_clog_cell_singlets_1_2$map$codes))
+
+EmbedSOM_results_test_df <- ds2_test_clog_cell_singlets_1_2$fs$data %>% as.data.frame() %>% mutate(mapping = ds2_test_clog_cell_singlets_1_2$map$mapping[, 1]) %>% left_join(grid_clustering_test_df, by = c("mapping" = "rowname")) %>% mutate(first_gate = facs_data_test_df$first_gate)
+```
+
+
+
+
+```{r}
+to_predict_no_SOM_selected <- facs_data_test_df %>% dplyr::select(-c(cell_type, first_gate)) %>% dplyr::select(c(FSC.A, SSC.A, FSC.H, SSC.W, Indo.1..Violet..A))
+
+# 55.66 sec elapsed
+tic()
+rules_prediction_no_SOM_selected_step_1 <- predict(rules_model_selected, newdata = to_predict_no_SOM_selected)
+tree_prediction_no_SOM_selected_step_1 <- predict(tree_model_selected, newdata = to_predict_no_SOM_selected)
+toc()
+
+confusion_matrix_results_no_SOM_selected_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), rules_prediction_no_SOM_selected_step_1)
+confusion_matrix_results_no_SOM_selected_tree <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), tree_prediction_no_SOM_selected_step_1)
+```
+
+```{r}
+to_predict_no_SOM_all <- facs_data_test_df %>% dplyr::select(-c(cell_type, first_gate))
+
+# 55.66 sec elapsed
+tic()
+rules_prediction_no_SOM_all_step_1 <- predict(rules_model_all, newdata = to_predict_no_SOM_all)
+tree_prediction_no_SOM_all_step_1 <- predict(tree_model_all, newdata = to_predict_no_SOM_all)
+toc()
+
+confusion_matrix_results_no_SOM_all_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), rules_prediction_no_SOM_all_step_1)
+confusion_matrix_results_no_SOM_all_tree <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), tree_prediction_no_SOM_all_step_1)
+```
+
+```{r}
+to_predict_from_SOM <- EmbedSOM_results_test_df %>% dplyr::select(dplyr::contains(".y"))
+
+tic()
+tree_prediction_from_SOM_step_1 <- predict(tree_boost_from_SOM, to_predict_from_SOM)
+rules_prediction_from_SOM_step_1 <- predict(rules_boost_from_SOM, to_predict_from_SOM)
+toc()
+
+confusion_matrix_results_from_SOM_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), rules_prediction_from_SOM_step_1)
+confusion_matrix_results_from_SOM_tree <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), tree_prediction_from_SOM_step_1)
+```
+
+```{r}
+to_predict_from_SOM_all <- EmbedSOM_results_test_df_all %>% dplyr::select(dplyr::contains(".y"))
+
+# 9.76 sec elapsed
+tic()
+rules_prediction_from_SOM_all_features_step_1 <- predict(rules_boost_from_SOM_all_features, to_predict_from_SOM_all)
+tree_prediction_from_SOM_all_features_step_1 <- predict(tree_boost_from_SOM_all_features, to_predict_from_SOM_all)
+toc()
+
+confusion_matrix_results_from_SOM_all_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), rules_prediction_from_SOM_all_features_step_1)
+confusion_matrix_results_from_SOM_all_tree <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), tree_prediction_from_SOM_all_features_step_1)
+```
+
+# Using some rules to avoid overfitting
+
+No SOM - selected features
+```{r}
+prediction_test_no_SOM_selected_df <- to_predict_no_SOM_selected %>% mutate(prediction_step_1 = case_when(Indo.1..Violet..A > 0.561 ~ "not_live"))
+prediction_test_no_SOM_selected_df <- prediction_test_no_SOM_selected_df %>% mutate(prediction_step_1 = if_else(is.na(prediction_step_1), true = "live", false = prediction_step_1))
+# prediction_test_no_SOM_selected_df <- to_predict_no_SOM_selected %>% mutate(prediction_step_1 = case_when(FSC.A <= 0.758 & FSC.H > 0.585 &	SSC.W <= 0.584 &	Indo.1..Violet..A <= 0.611 ~ "live"))
+# prediction_test_no_SOM_selected_df <- prediction_test_no_SOM_selected_df %>% mutate(prediction_step_1 = if_else(is.na(prediction_step_1), true = "not_live", false = prediction_step_1))
+prediction_test_no_SOM_selected_df <- prediction_test_no_SOM_selected_df %>% mutate(prediction_step_1 = prediction_step_1 %>% factor())
+
+confusion_matrix_results_no_SOM_selected_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), prediction_test_no_SOM_selected_df$prediction_step_1)
+```
+
+No SOM - all features
+```{r}
+# prediction_test_no_SOM_df <- to_predict_no_SOM %>% mutate(prediction_step_1 = case_when(FSC.A.y <= 0.581 & SSC.A.y > 0.543 ~ "not_live"))
+# 
+# prediction_test_no_SOM_df <- prediction_test_no_SOM_df %>% mutate(prediction_step_1 = if_else(is.na(prediction_step_1), true = "live", false = prediction_step_1))
+# prediction_test_no_SOM_df <- prediction_test_no_SOM_df %>% mutate(prediction_step_1 = prediction_step_1 %>% factor())
+# 
+# confusion_matrix_results_no_SOM_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), prediction_test_no_SOM_df$prediction_step_1)
+```
+
+SOM - selected features
+```{r}
+# prediction_test_from_SOM_df <- to_predict_from_SOM %>% mutate(prediction_step_1 = case_when(SSC.W.y > 0.574 | FJComp.Indo.1..Violet..A.y > 0.566 ~ "not_live"))
+
+# prediction_test_from_SOM_df <- to_predict_from_SOM %>% mutate(prediction_step_1 = case_when(FSC.A.y <= 0.581 & SSC.A.y > 0.543 | FSC.A.y <= 0.551 | SSC.A.y <= 0.514 | FJComp.Indo.1..Violet..A.y > 0.566 | SSC.W.y > 0.573 ~ "not_live"))
+
+# prediction_test_from_SOM_df <- to_predict_from_SOM %>% mutate(prediction_step_1 = case_when(FSC.A.y <= 0.581 & SSC.A.y > 0.543 | FJComp.Indo.1..Violet..A.y > 0.561 ~ "not_live"))
+
+prediction_test_from_SOM_df <- to_predict_from_SOM %>% mutate(prediction_step_1 = case_when(FSC.A.y <= 0.581 & SSC.A.y > 0.543 ~ "not_live"))
+
+prediction_test_from_SOM_df <- prediction_test_from_SOM_df %>% mutate(prediction_step_1 = if_else(is.na(prediction_step_1), true = "live", false = prediction_step_1))
+prediction_test_from_SOM_df <- prediction_test_from_SOM_df %>% mutate(prediction_step_1 = prediction_step_1 %>% factor())
+
+confusion_matrix_results_from_SOM_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), prediction_test_from_SOM_df$prediction_step_1)
+```
+
+SOM - all features
+```{r}
+prediction_test_from_SOM_all_df <- to_predict_from_SOM_all %>% mutate(prediction_step_1 = case_when(FSC.A.y > 0.370 & FJComp.AmCyan.A.y <= 0.236 | FJComp.BV786.A.y > 0.416 &	FJComp.FITC.A.y <= 0.493 | FJComp.PE.Cy7.A.y <= 0.537 & FJComp.Pacific.Blue.A.y > 0.583 | FJComp.Qdot.605.A.y <= 0.322 ~ "live"))
+prediction_test_from_SOM_all_df <- prediction_test_from_SOM_all_df %>% mutate(prediction_step_1 = if_else(is.na(prediction_step_1), true = "not_live", false = prediction_step_1))
+prediction_test_from_SOM_all_df <- prediction_test_from_SOM_all_df %>% mutate(prediction_step_1 = prediction_step_1 %>% factor())
+
+confusion_matrix_results_from_SOM_all_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), prediction_test_from_SOM_all_df$prediction_step_1)
+```
+
+
+
+
+
+
+
+
+
+
+# function with all steps combined
+```{r}
+to_transform <- c(1:18)
+  to_filter <- c(1:6)
+
+process_step_1 <- function(files_to_load, to_transform, to_filter){
+  library(tidyverse)
+  library(bestNormalize)
+  diff_som <- files_to_load %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = to_filter, scale = FALSE, transform = TRUE, toTransform = to_transform)
+  diff_som_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+  normally_dstributed <- diff_som_df %>% purrr::map(bestNormalize::orderNorm)
+  normally_dstributed_df <- purrr::map(seq_along(normally_dstributed), function(i) normally_dstributed[[i]]$x.t) %>% purrr::set_names(colnames(diff_som_df)) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols()
+  diff_som$fs$data[, to_transform] <- normally_dstributed_df %>% as.matrix()
+  
+  cell_types <- files_to_load_names %>% str_remove(pattern = ".fcs") %>% str_remove(pattern = "export_Specimen_..._c....._..._..._")
+  cell_types_df <- cell_types %>% as.data.frame() %>% rownames_to_column() %>% dplyr::rename("cell_types" = ".", "File" = "rowname") %>% mutate(File = File %>% as.numeric())
+  manual_gating <- diff_som$fs$data %>% as.data.frame() %>% full_join(cell_types_df) %>% na.omit() %>% dplyr::select(cell_types) %>% unlist() %>% as.character() %>% factor()
+  facs_data_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(to_transform)
+  facs_data_df <- facs_data_df %>% purrr::set_names(str_remove(string = names(facs_data_df), pattern = "FJComp."))
+  facs_data_df <- facs_data_df %>% mutate(cell_type = manual_gating)
+  facs_data_df <- facs_data_df %>% mutate(first_gate = case_when(!(cell_type %in% c("clog+", "clog-_cells-", "S1-", "S2-", "dead")) ~ "live"))
+  facs_data_df <- facs_data_df %>% mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+  vesanto_dim <- diff_som$fs$data %>% nrow() %>% sqrt() %>% "*"(5)
+  grid_dim <- vesanto_dim %>% sqrt() %>% ceiling() %>% "+"(20)
+  reseed()
+  ds_step_1_all_features <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = to_transform, importance = rep(1, 18), nclust = grid_dim*grid_dim, rlen = 5)
+  
+  ds_step_1_all_features$map$codes <- purrr::map(seq_len(ncol(ds_step_1_all_features$map$codes)), function(i) ds_step_1_all_features$map$codes[, i] %>% bestNormalize::orderNorm() %>% .[["x.t"]] %>% scale_to_range_0_1()) %>% purrr::set_names(colnames(ds_step_1_all_features$map$codes)) %>% bind_cols()
+  reseed()
+  
+  ds_step_1_selected_features <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "FJComp.Indo.1..Violet..A"), importance = rep(1, 5), nclust = grid_dim*grid_dim, rlen = 5)
+  
+  ds_step_1_selected_features$map$codes <- purrr::map(seq_len(ncol(ds_step_1_selected_features$map$codes)), function(i) ds_step_1_selected_features$map$codes[, i] %>% bestNormalize::orderNorm() %>% .[["x.t"]] %>% scale_to_range_0_1()) %>% purrr::set_names(colnames(ds_step_1_selected_features$map$codes)) %>% bind_cols()
+  
+  grid_clustering_df_all <- ds_step_1_all_features$map$grid %>% as.data.frame() %>% rownames_to_column() %>% mutate(cluster = ds_step_1_all_features$clust) %>% mutate(rowname = rowname %>% as.numeric()) %>% bind_cols(as.data.frame(ds_step_1_all_features$map$codes))
+
+  EmbedSOM_results_df_all <- ds_step_1_all_features$fs$data %>% as.data.frame() %>% mutate(mapping = ds_step_1_all_features$map$mapping[, 1]) %>% left_join(grid_clustering_df_all, by = c("mapping" = "rowname")) %>% mutate(first_gate = facs_data_df$first_gate)
+  
+  grid_clustering_df <- ds_step_1_selected_features$map$grid %>% as.data.frame() %>% rownames_to_column() %>% mutate(cluster = ds_step_1_selected_features$clust) %>% mutate(rowname = rowname %>% as.numeric()) %>% bind_cols(as.data.frame(ds_step_1_selected_features$map$codes))
+
+  EmbedSOM_results_df <- ds_step_1_selected_features$fs$data %>% as.data.frame() %>% mutate(mapping = ds_step_1_selected_features$map$mapping[, 1]) %>% left_join(grid_clustering_df, by = c("mapping" = "rowname")) %>% mutate(first_gate = facs_data_df$first_gate)
+  
+  output <- list(EmbedSOM_results_df = EmbedSOM_results_df,
+                 EmbedSOM_results_df_all = EmbedSOM_results_df_all,
+                 facs_data_df = facs_data_df)
+  return(output)
+}
+
+
+process_C5 <- function(input = process_step_1_output){
+  EmbedSOM_results_df_all = process_step_1_output$EmbedSOM_results_df_all
+  EmbedSOM_results_df = process_step_1_output$EmbedSOM_results_df
+  facs_data_df = process_step_1_output$facs_data_df
+  
+  features_all_from_SOM <- EmbedSOM_results_df_all %>% dplyr::select(dplyr::contains(".y"))
+  features_selected_from_SOM <- EmbedSOM_results_df %>% dplyr::select(dplyr::contains(".y"))
+  
+  features_all_no_SOM <- facs_data_df %>% dplyr::select(-c(first_gate, cell_type))
+  features_selected_no_SOM <- facs_data_df %>% dplyr::select(-c(first_gate, cell_type)) %>% dplyr::select(c(FSC.A, SSC.A, FSC.H, SSC.W, Indo.1..Violet..A))
+  
+  classes <- EmbedSOM_results_df$first_gate %>% factor()
+  
+  cl <- makePSOCKcluster(6)
+  registerDoParallel(cl)
+
+  rules_model_selected <- C5.0(x = features_selected_no_SOM, y = classes, trials = 20, rules = TRUE)
+  tree_model_selected <- C5.0(x = features_selected_no_SOM, y = classes, trials = 20, rules = FALSE)
+  
+  rules_model_all <- C5.0(x = features_all_no_SOM, y = classes, trials = 20, rules = TRUE)
+  tree_model_all <- C5.0(x = features_all_no_SOM, y = classes, trials = 20, rules = FALSE)
+  
+  rules_model_from_SOM <- C5.0(x = features_selected_from_SOM, y = classes, trials = 1, rules = TRUE)
+  tree_model_from_SOM <- C5.0(x = features_selected_from_SOM, y = classes, trials = 1, rules = FALSE)
+
+  tree_model_from_SOM_all_features <- C5.0(x = features_all_from_SOM, y = classes, trials = 1, rules = FALSE)
+  rules_model_from_SOM_all_features <- C5.0(x = features_all_from_SOM, y = classes, trials = 1, rules = TRUE)
+  
+  stopCluster(cl)
+}
+
+
+to_predict_no_SOM_selected <- facs_data_test_df %>% dplyr::select(-c(cell_type, first_gate)) %>% dplyr::select(c(FSC.A, SSC.A, FSC.H, SSC.W, Indo.1..Violet..A))
+
+rules_prediction_no_SOM_selected_step_1 <- predict(rules_model_selected, newdata = to_predict_no_SOM_selected)
+tree_prediction_no_SOM_selected_step_1 <- predict(tree_model_selected, newdata = to_predict_no_SOM_selected)
+
+confusion_matrix_results_no_SOM_selected_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), rules_prediction_no_SOM_selected_step_1)
+confusion_matrix_results_no_SOM_selected_tree <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), tree_prediction_no_SOM_selected_step_1)
+
+to_predict_no_SOM_all <- facs_data_test_df %>% dplyr::select(-c(cell_type, first_gate))
+
+rules_prediction_no_SOM_all_step_1 <- predict(rules_model_all, newdata = to_predict_no_SOM_all)
+tree_prediction_no_SOM_all_step_1 <- predict(tree_model_all, newdata = to_predict_no_SOM_all)
+
+confusion_matrix_results_no_SOM_all_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), rules_prediction_no_SOM_all_step_1)
+confusion_matrix_results_no_SOM_all_tree <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), tree_prediction_no_SOM_all_step_1)
+
+to_predict_from_SOM <- EmbedSOM_results_test_df %>% dplyr::select(dplyr::contains(".y"))
+
+tree_prediction_from_SOM_step_1 <- predict(tree_boost_from_SOM, to_predict_from_SOM)
+rules_prediction_from_SOM_step_1 <- predict(rules_boost_from_SOM, to_predict_from_SOM)
+
+confusion_matrix_results_from_SOM_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), rules_prediction_from_SOM_step_1)
+confusion_matrix_results_from_SOM_tree <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), tree_prediction_from_SOM_step_1)
+
+to_predict_from_SOM_all <- EmbedSOM_results_test_df_all %>% dplyr::select(dplyr::contains(".y"))
+
+rules_prediction_from_SOM_all_features_step_1 <- predict(rules_boost_from_SOM_all_features, to_predict_from_SOM_all)
+tree_prediction_from_SOM_all_features_step_1 <- predict(tree_boost_from_SOM_all_features, to_predict_from_SOM_all)
+
+confusion_matrix_results_from_SOM_all_rules <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), rules_prediction_from_SOM_all_features_step_1)
+confusion_matrix_results_from_SOM_all_tree <- confusionMatrix(facs_data_test_df$first_gate %>% factor(), tree_prediction_from_SOM_all_features_step_1)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+ds_test_step_1_all_features
+```
+
+
+
+
+
+
+
+
+
+
+# worflow step 1 - test - KO samples
+```{r load_fcs_files}
+# 53.377 sec elapsed
+# tic()
+# diff_som_test_KO <- files_to_load_3 %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = TRUE, toScale = c(1:18), transform = TRUE, toTransform = c(7:18))
+# toc()
+
+# 4.655 sec elapsed
+tic()
+# diff_som_no_scale_test_KO <- ko_files_to_load_1 %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+diff_som_no_scale_test_KO <- ko_files_to_load_2 %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+# diff_som_no_scale_test_KO <- files_to_load_3 %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+toc()
+
+# tic()
+# diff_som_no_scale_no_transform_test_KO <- files_to_load_3 %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(7:18))
+# toc()
+```
+
+
+# Transform data into normally distributed
+```{r}
+diff_som_test_KO_df <- diff_som_no_scale_test_KO$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+
+# diff_som_df <- diff_som_no_scale_no_tranform$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+
+# normally_dstributed <- diff_som_df %>% purrr::map(bestNormalize)
+
+normally_dstributed_test_KO <- diff_som_test_KO_df %>% purrr::map(bestNormalize::orderNorm)
+
+normally_dstributed_test_KO_df <- purrr::map(seq_along(normally_dstributed_test_KO), function(i) normally_dstributed_test_KO[[i]]$x.t) %>% purrr::set_names(colnames(diff_som_test_KO_df)) %>% purrr::map(scale_to_range_0_1) %>% bind_cols()
+
+diff_som_no_scale_test_KO$fs$data[, 1:18] <- normally_dstributed_test_KO_df %>% as.matrix()
+
+diff_som_test_KO <- diff_som_no_scale_test_KO
+```
+
+```{r manual_gating}
+# cell_types_test_KO <- files_to_load_names_3 %>% str_remove(pattern = ".fcs") %>% str_remove(pattern = "export_Specimen_..._c....._..._..._")
+cell_types_test_KO <- files_to_load_names_3 %>% str_remove(pattern = ".fcs") %>% str_remove(pattern = "export_Specimen_..._c....._..._..._")
+
+cell_types_test_KO_df <- cell_types_test_KO %>% as.data.frame() %>% rownames_to_column() %>% dplyr::rename("cell_types" = ".", "File" = "rowname") %>% mutate(File = File %>% as.numeric())
+# manual_gating <- facs_clean@exprs %>% as.data.frame() %>% full_join(cell_types_df) %>% na.omit() %>% dplyr::select(cell_types) %>% unlist() %>% as.character() %>% make.names() %>% factor()
+manual_gating_test_KO <- diff_som_test_KO$fs$data %>% as.data.frame() %>% full_join(cell_types_test_KO_df) %>% na.omit() %>% dplyr::select(cell_types) %>% unlist() %>% as.character() %>% factor()
+
+facs_data_test_KO_df <- diff_som_test_KO$fs$data %>% as.data.frame() %>% dplyr::select(c(1:18))
+# facs_data_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(c(1, 4, 7:18))
+facs_data_test_KO_df <- facs_data_test_KO_df %>% purrr::set_names(str_remove(string = names(facs_data_test_KO_df), pattern = "FJComp."))
+facs_data_test_KO_df <- facs_data_test_KO_df %>% mutate(cell_type = manual_gating_test_KO)
+```
+
+```{r}
+facs_data_test_KO_df <- facs_data_test_KO_df %>% mutate(first_gate = case_when(!(cell_type %in% c("clog+", "clog-_cells-", "S1-", "S2-", "dead")) ~ "live"))
+
+# facs_data_df <- facs_data_df %>% mutate(first_gate = if_else(is.na(first_gate), true = as.character(cell_type), false = first_gate))
+
+facs_data_test_KO_df <- facs_data_test_KO_df %>% mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+```
+
+
+# Workflow step - Apply SOM algorithm
+```{r}
+vesanto_dim_test_KO <- diff_som_test_KO$fs$data %>% nrow() %>% sqrt() %>% "*"(5)
+grid_dim_test_KO <- vesanto_dim_test_KO %>% sqrt() %>% ceiling() %>% "+"(20)
+
+# 91.296 sec elapsed
+tic()
+reseed()
+ds_test_KO_step_1_all_features <- diff_som_test_KO %>% Embed(xdim = grid_dim_test_KO, ydim = grid_dim_test_KO, colsToUse = c(1:18), importance = rep(1, 18), nclust = grid_dim_test_KO*grid_dim_test_KO, rlen = 5)
+toc()
+
+
+# 43.492 sec elapsed on PC
+tic()
+reseed()
+ds2_test_KO_clog_cell_singlets_1_2 <- diff_som_test_KO %>% Embed(xdim = grid_dim_test_KO, ydim = grid_dim_test_KO, colsToUse = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "FJComp.Indo.1..Violet..A"), importance = rep(1, 5), nclust = grid_dim_test_KO*grid_dim_test_KO, rlen = 5)
+toc()
+```
+
+```{r}
+grid_clustering_test_KO_df_all <- ds_test_KO_step_1_all_features$map$grid %>% as.data.frame() %>% rownames_to_column() %>% mutate(cluster = ds_test_KO_step_1_all_features$clust) %>% mutate(rowname = rowname %>% as.numeric()) %>% bind_cols(as.data.frame(ds_test_KO_step_1_all_features$map$codes))
+
+EmbedSOM_results_test_KO_df_all <- ds_test_KO_step_1_all_features$fs$data %>% as.data.frame() %>% mutate(mapping = ds_test_KO_step_1_all_features$map$mapping[, 1]) %>% left_join(grid_clustering_test_KO_df_all, by = c("mapping" = "rowname")) %>% mutate(first_gate = facs_data_test_KO_df$first_gate)
+```
+
+```{r}
+grid_clustering_test_KO_df <- ds2_test_KO_clog_cell_singlets_1_2$map$grid %>% as.data.frame() %>% rownames_to_column() %>% mutate(cluster = ds2_test_KO_clog_cell_singlets_1_2$clust) %>% mutate(rowname = rowname %>% as.numeric()) %>% bind_cols(as.data.frame(ds2_test_KO_clog_cell_singlets_1_2$map$codes))
+
+EmbedSOM_results_test_KO_df <- ds2_test_KO_clog_cell_singlets_1_2$fs$data %>% as.data.frame() %>% mutate(mapping = ds2_test_KO_clog_cell_singlets_1_2$map$mapping[, 1]) %>% left_join(grid_clustering_test_KO_df, by = c("mapping" = "rowname")) %>% mutate(first_gate = facs_data_test_KO_df$first_gate)
+```
+
+
+# Predictions for KO file
+```{r}
+to_predict_KO_no_SOM_selected <- facs_data_test_KO_df %>% 
+  dplyr::select(-c(cell_type, first_gate)) %>% 
+  dplyr::select(c(FSC.A, SSC.A, FSC.H, SSC.W, Indo.1..Violet..A))
+
+# 55.66 sec elapsed
+tic()
+rules_prediction_KO_no_SOM_selected_step_1 <- predict(rules_model_selected, newdata = to_predict_KO_no_SOM_selected)
+tree_prediction_KO_no_SOM_selected_step_1 <- predict(tree_model_selected, newdata = to_predict_KO_no_SOM_selected)
+toc()
+
+confusion_matrix_results_KO_no_SOM_selected_rules <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), rules_prediction_KO_no_SOM_selected_step_1)
+confusion_matrix_results_KO_no_SOM_selected_tree <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), tree_prediction_KO_no_SOM_selected_step_1)
+```
+
+```{r}
+to_predict_KO_no_SOM_all <- facs_data_test_KO_df %>% dplyr::select(-c(cell_type, first_gate))
+
+# 55.66 sec elapsed
+tic()
+rules_prediction_KO_no_SOM_all_step_1 <- predict(rules_model_all, newdata = to_predict_KO_no_SOM_all)
+tree_prediction_KO_no_SOM_all_step_1 <- predict(tree_model_all, newdata = to_predict_KO_no_SOM_all)
+toc()
+
+confusion_matrix_results_KO_no_SOM_all_rules <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), rules_prediction_KO_no_SOM_all_step_1)
+confusion_matrix_results_KO_no_SOM_all_tree <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), tree_prediction_KO_no_SOM_all_step_1)
+```
+
+```{r}
+to_predict_KO_from_SOM <- EmbedSOM_results_test_KO_df %>% dplyr::select(dplyr::contains(".y"))
+
+tic()
+tree_prediction_KO_from_SOM_step_1 <- predict(tree_boost_from_SOM, to_predict_KO_from_SOM)
+rules_prediction_KO_from_SOM_step_1 <- predict(rules_boost_from_SOM, to_predict_KO_from_SOM)
+toc()
+
+confusion_matrix_results_KO_from_SOM_rules <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), rules_prediction_KO_from_SOM_step_1)
+confusion_matrix_results_KO_from_SOM_tree <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), tree_prediction_KO_from_SOM_step_1)
+```
+
+```{r}
+to_predict_KO_from_SOM_all <- EmbedSOM_results_test_KO_df_all %>% dplyr::select(dplyr::contains(".y"))
+
+# 9.76 sec elapsed
+tic()
+rules_prediction_KO_from_SOM_all_features_step_1 <- predict(rules_boost_from_SOM_all_features, to_predict_KO_from_SOM_all)
+tree_prediction_KO_from_SOM_all_features_step_1 <- predict(tree_boost_from_SOM_all_features, to_predict_KO_from_SOM_all)
+toc()
+
+confusion_matrix_results_KO_from_SOM_all_rules <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), rules_prediction_KO_from_SOM_all_features_step_1)
+confusion_matrix_results_KO_from_SOM_all_tree <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), tree_prediction_KO_from_SOM_all_features_step_1)
+```
+
+# Using some rules to avoid overfitting
+
+No SOM - selected features
+```{r}
+prediction_test_KO_no_SOM_selected_df <- to_predict_KO_no_SOM_selected %>% mutate(prediction_step_1 = case_when(Indo.1..Violet..A > 0.561 ~ "not_live"))
+prediction_test_KO_no_SOM_selected_df <- prediction_test_KO_no_SOM_selected_df %>% mutate(prediction_step_1 = if_else(is.na(prediction_step_1), true = "live", false = prediction_step_1))
+# prediction_test_KO_no_SOM_selected_df <- to_predict_KO_no_SOM_selected %>% mutate(prediction_step_1 = case_when(FSC.A <= 0.758 & FSC.H > 0.585 &	SSC.W <= 0.584 &	Indo.1..Violet..A <= 0.611 ~ "live"))
+# prediction_test_KO_no_SOM_selected_df <- prediction_test_KO_no_SOM_selected_df %>% mutate(prediction_step_1 = if_else(is.na(prediction_step_1), true = "not_live", false = prediction_step_1))
+prediction_test_KO_no_SOM_selected_df <- prediction_test_KO_no_SOM_selected_df %>% mutate(prediction_step_1 = prediction_step_1 %>% factor())
+
+confusion_matrix_results_KO_no_SOM_selected_rules <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), prediction_test_KO_no_SOM_selected_df$prediction_step_1)
+```
+
+No SOM - all features
+```{r}
+# prediction_test_no_SOM_df <- to_predict_no_SOM %>% mutate(prediction_step_1 = case_when(FSC.A.y <= 0.581 & SSC.A.y > 0.543 ~ "not_live"))
+# 
+# prediction_test_no_SOM_df <- prediction_test_no_SOM_df %>% mutate(prediction_step_1 = if_else(is.na(prediction_step_1), true = "live", false = prediction_step_1))
+# prediction_test_no_SOM_df <- prediction_test_no_SOM_df %>% mutate(prediction_step_1 = prediction_step_1 %>% factor())
+# 
+# confusion_matrix_results_no_SOM_rules <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), prediction_test_no_SOM_df$prediction_step_1)
+```
+
+SOM - selected features
+```{r}
+# prediction_test_KO_from_SOM_df <- to_predict_KO_from_SOM %>% mutate(prediction_step_1 = case_when(SSC.W.y > 0.574 | FJComp.Indo.1..Violet..A.y > 0.566 ~ "not_live"))
+
+# prediction_test_KO_from_SOM_df <- to_predict_KO_from_SOM %>% mutate(prediction_step_1 = case_when(FSC.A.y <= 0.581 & SSC.A.y > 0.543 | FSC.A.y <= 0.551 | SSC.A.y <= 0.514 | FJComp.Indo.1..Violet..A.y > 0.566 | SSC.W.y > 0.573 ~ "not_live"))
+
+prediction_test_KO_from_SOM_df <- to_predict_KO_from_SOM %>% mutate(prediction_step_1 = case_when(FSC.A.y <= 0.581 & SSC.A.y > 0.543 ~ "not_live"))
+
+prediction_test_KO_from_SOM_df <- prediction_test_KO_from_SOM_df %>% mutate(prediction_step_1 = if_else(is.na(prediction_step_1), true = "live", false = prediction_step_1))
+prediction_test_KO_from_SOM_df <- prediction_test_KO_from_SOM_df %>% mutate(prediction_step_1 = prediction_step_1 %>% factor())
+
+confusion_matrix_results_KO_from_SOM_rules <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), prediction_test_KO_from_SOM_df$prediction_step_1)
+```
+
+SOM - all features
+```{r}
+prediction_test_KO_from_SOM_all_df <- to_predict_KO_from_SOM_all %>% mutate(prediction_step_1 = case_when(FSC.A.y > 0.370 & FJComp.AmCyan.A.y <= 0.236 | FJComp.BV786.A.y > 0.416 &	FJComp.FITC.A.y <= 0.493 | FJComp.PE.Cy7.A.y <= 0.537 & FJComp.Pacific.Blue.A.y > 0.583 | FJComp.Qdot.605.A.y <= 0.322 ~ "live"))
+prediction_test_KO_from_SOM_all_df <- prediction_test_KO_from_SOM_all_df %>% mutate(prediction_step_1 = if_else(is.na(prediction_step_1), true = "not_live", false = prediction_step_1))
+prediction_test_KO_from_SOM_all_df <- prediction_test_KO_from_SOM_all_df %>% mutate(prediction_step_1 = prediction_step_1 %>% factor())
+
+confusion_matrix_results_KO_from_SOM_all_rules <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), prediction_test_KO_from_SOM_all_df$prediction_step_1)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+to_predict_no_SOM_KO <- facs_data_test_KO_df %>% dplyr::select(-c(cell_type, first_gate))
+
+# 34.531 sec elapsed
+tic()
+rules_prediction_no_SOM_KO_step_1 <- predict(rules_model, newdata = to_predict_no_SOM_KO)
+toc()
+
+confusion_matrix_results_no_SOM_KO <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), rules_prediction_no_SOM_KO_step_1)
+```
+
+```{r}
+to_predict_from_SOM_KO <- EmbedSOM_results_test_KO_df %>% dplyr::select(dplyr::contains(".y"))
+
+# 2.123 sec elapsed
+tic()
+rules_prediction_from_SOM_KO_step_1 <- predict(tree_boost_from_SOM, to_predict_from_SOM_KO)
+toc()
+
+confusion_matrix_results_from_SOM_KO <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), rules_prediction_from_SOM_KO_step_1)
+```
+
+```{r}
+to_predict_from_SOM_KO_all <- EmbedSOM_results_test_KO_df_all %>% dplyr::select(dplyr::contains(".y"))
+
+# 9.76 sec elapsed
+tic()
+rules_prediction_from_SOM_KO_all_features_step_1 <- predict(tree_boost_from_SOM_all_features, to_predict_from_SOM_KO_all)
+toc()
+
+confusion_matrix_results_from_SOM_KO_all <- confusionMatrix(facs_data_test_KO_df$first_gate %>% factor(), rules_prediction_from_SOM_KO_all_features_step_1)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Gate
+```{r}
+live_indices <- EmbedSOM_results_df %>% dplyr::filter(FJComp.Indo.1..Violet..A.y < 0.68)
+
+ds2_clog_cell_singlets_1_2$fs$data %>% as.data.frame() %>% dplyr::splice()
+```
+
+
+
+# Workflow step - Set rules
+```{r}
+scale_to_0_1 <- function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+
+optimize_rules_step_1 <- function(EmbedSOM_results_df, FSC.A_threshold = max("FSC.A.y"), FSC.H_threshold = max("FSC.H.y"), SSC.A_threshold = max("SSC.A.y"), SSC.W_threshold = max("SSC.W.y"), via_threshold = max("FJComp.Indo.1..Violet..A.y")){
+  
+  selected_neurons <- EmbedSOM_results_df %>%
+    dplyr::filter(FSC.A.y < FSC.A_threshold) %>%
+    dplyr::filter(FSC.H.y < FSC.H_threshold) %>%
+    dplyr::filter(SSC.A.y < SSC.A_threshold) %>%
+    dplyr::filter(SSC.W.y < SSC.W_threshold) %>%
+    dplyr::filter(FJComp.Indo.1..Violet..A.y < via_threshold) %>% 
+    dplyr::select(mapping) %>% 
+    pull() %>% 
+    as.numeric()
+  
+  live_df <- EmbedSOM_results_df %>%
+    mutate(classification = case_when(c(mapping %in% selected_neurons) ~ "live")) %>%
+    mutate(classification = classification %>% if_else(condition = is.na(classification), true = "not_live", false = "live")) %>%
+    mutate(classification = classification %>% factor(levels = c("live", "not_live"))) %>%
+    mutate(first_gate = first_gate %>% factor(levels = c("live", "not_live")))
+  
+  confusion_matrix <- confusionMatrix(live_df$first_gate, live_df$classification)
+  accuracy <- confusion_matrix$overall[["Accuracy"]]
+  return(accuracy)
+}
+
+# optimize_rules_step_1(EmbedSOM_results_df = EmbedSOM_results_df, grid_clustering_df = grid_clustering_df, FSC.A_threshold = 1, FSC.H_threshold = 1, SSC.A_threshold = 1, SSC.W_threshold = 0.25, via_threshold = .69)
+
+
+FSC_A_1 <- data.frame(
+  accuracy = purrr::map(seq(range(EmbedSOM_results_df$FSC.A.y)[1], range(EmbedSOM_results_df$FSC.A.y)[2], length.out = 100), function(i) optimize_rules_step_1(EmbedSOM_results_df, SSC.W_threshold = i)) %>% unlist(),
+  threshold = seq(range(EmbedSOM_results_df$FSC.A.y)[1], range(EmbedSOM_results_df$FSC.A.y)[2], length.out = 100)
+)
+
+FSC_A_1 %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+FSC_H_1 <- data.frame(
+  accuracy = purrr::map(seq(range(EmbedSOM_results_df$FSC.H.y)[1], range(EmbedSOM_results_df$FSC.H.y)[2], length.out = 100), function(i) optimize_rules_step_1(EmbedSOM_results_df, SSC.W_threshold = i)) %>% unlist(),
+  threshold = seq(range(EmbedSOM_results_df$FSC.H.y)[1], range(EmbedSOM_results_df$FSC.H.y)[2], length.out = 100)
+)
+
+FSC_H_1 %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+SSC_A_1 <- data.frame(
+  accuracy = purrr::map(seq(range(EmbedSOM_results_df$SSC.A.y)[1], range(EmbedSOM_results_df$SSC.A.y)[2], length.out = 100), function(i) optimize_rules_step_1(EmbedSOM_results_df, SSC.W_threshold = i)) %>% unlist(),
+  threshold = seq(range(EmbedSOM_results_df$SSC.A.y)[1], range(EmbedSOM_results_df$SSC.A.y)[2], length.out = 100)
+)
+
+SSC_A_1 %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+SSC_W_1 <- data.frame(
+  accuracy = purrr::map(seq(range(EmbedSOM_results_df$SSC.W.y)[1], range(EmbedSOM_results_df$SSC.W.y)[2], length.out = 100), function(i) optimize_rules_step_1(EmbedSOM_results_df, SSC.W_threshold = i)) %>% unlist(),
+  threshold = seq(range(EmbedSOM_results_df$SSC.W.y)[1], range(EmbedSOM_results_df$SSC.W.y)[2], length.out = 100)
+)
+
+SSC_W_1 %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+via_1 <- data.frame(
+  accuracy = purrr::map(seq(range(EmbedSOM_results_df$FJComp.Indo.1..Violet..A.y)[1], range(EmbedSOM_results_df$FJComp.Indo.1..Violet..A.y)[2], length.out = 100), function(i) optimize_rules_step_1(EmbedSOM_results_df, via_threshold = i)) %>% unlist(),
+  threshold = seq(range(EmbedSOM_results_df$FJComp.Indo.1..Violet..A.y)[1], range(EmbedSOM_results_df$FJComp.Indo.1..Violet..A.y)[2], length.out = 100)
+)
+
+via_1 %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+FSC_A_1_thres <- FSC_A_1 %>% dplyr::slice(FSC_A_1$accuracy %>% which.max()) %>% dplyr::select(threshold) %>% pull()
+FSC_H_1_thres <- FSC_H_1 %>% dplyr::slice(FSC_H_1$accuracy %>% which.max()) %>% dplyr::select(threshold) %>% pull()
+SSC_A_1_thres <- SSC_A_1 %>% dplyr::slice(SSC_A_1$accuracy %>% which.max()) %>% dplyr::select(threshold) %>% pull()
+SSC_W_1_thres <- SSC_W_1 %>% dplyr::slice(SSC_W_1$accuracy %>% which.max()) %>% dplyr::select(threshold) %>% pull()
+via_1_thres <- via_1 %>% dplyr::slice(via_1$accuracy %>% which.max()) %>% dplyr::select(threshold) %>% pull()
+
+EmbedSOM_results_df %>% optimize_rules_step_1(via_threshold = via_1_thres)
+
+FSC_A_1_via <- data.frame(
+  accuracy = purrr::map(seq(range(EmbedSOM_results_df$FSC.A.y)[1], range(EmbedSOM_results_df$FSC.A.y)[2], length.out = 100), function(i) optimize_rules_step_1(EmbedSOM_results_df, SSC.W_threshold = i, via_threshold = via_1_thres)) %>% unlist(),
+  threshold = seq(range(EmbedSOM_results_df$FSC.A.y)[1], range(EmbedSOM_results_df$FSC.A.y)[2], length.out = 100)
+)
+
+FSC_A_1_via %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+FSC_H_1_via <- data.frame(
+  accuracy = purrr::map(seq(range(EmbedSOM_results_df$FSC.H.y)[1], range(EmbedSOM_results_df$FSC.H.y)[2], length.out = 100), function(i) optimize_rules_step_1(EmbedSOM_results_df, SSC.W_threshold = i, via_threshold = via_1_thres)) %>% unlist(),
+  threshold = seq(range(EmbedSOM_results_df$FSC.H.y)[1], range(EmbedSOM_results_df$FSC.H.y)[2], length.out = 100)
+)
+
+FSC_H_1_via %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+SSC_A_1_via <- data.frame(
+  accuracy = purrr::map(seq(range(EmbedSOM_results_df$SSC.A.y)[1], range(EmbedSOM_results_df$SSC.A.y)[2], length.out = 100), function(i) optimize_rules_step_1(EmbedSOM_results_df, SSC.W_threshold = i, via_threshold = via_1_thres)) %>% unlist(),
+  threshold = seq(range(EmbedSOM_results_df$SSC.A.y)[1], range(EmbedSOM_results_df$SSC.A.y)[2], length.out = 100)
+)
+
+SSC_A_1_via %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+SSC_W_1_via <- data.frame(
+  accuracy = purrr::map(seq(range(EmbedSOM_results_df$SSC.W.y)[1], range(EmbedSOM_results_df$SSC.W.y)[2], length.out = 100), function(i) optimize_rules_step_1(EmbedSOM_results_df, SSC.W_threshold = i, via_threshold = via_1_thres)) %>% unlist(),
+  threshold = seq(range(EmbedSOM_results_df$SSC.W.y)[1], range(EmbedSOM_results_df$SSC.W.y)[2], length.out = 100)
+)
+
+SSC_W_1_via %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+
+
+
+
+
+
+
+
+
+grid_clustering_df %>% ggplot(aes(x = FSC.A, y = FSC.H)) + geom_point()
+
+grid_clustering_df %>% ggplot(aes(x = FSC.A, y = SSC.W)) + geom_point()
+
+grid_clustering_df %>% ggplot(aes(x = FSC.A, y = FJComp.Indo.1..Violet..A)) + geom_point()
+
+diff_som$fs$data %>% as.data.frame() %>% ggplot(aes(x = FSC.A, y = FSC.H)) + geom_point()
+
+diff_som$fs$data %>% as.data.frame() %>% ggplot(aes(x = FSC.A, y = SSC.W)) + geom_point()
+
+diff_som$fs$data %>% as.data.frame() %>% ggplot(aes(x = FSC.A, y = FJComp.Indo.1..Violet..A)) + geom_point()
+
+diff_som_no_scale$fs$data %>% as.data.frame() %>% ggplot(aes(x = FSC.A, y = FJComp.Indo.1..Violet..A)) + geom_point()
+
+EmbedSOM_results_df %>% ggplot(aes(x = FSC.A.x, y = FSC.H.x)) + geom_point(aes(colour = factor(mapping))) + theme(legend.position = "none")
+
+EmbedSOM_results_df %>% ggplot(aes(x = FSC.A.x, y = SSC.W.x)) + geom_point(aes(colour = factor(mapping))) + theme(legend.position = "none")
+
+EmbedSOM_results_df %>% ggplot(aes(x = FSC.A.x, y = FJComp.Indo.1..Violet..A.x)) + geom_point(aes(colour = factor(mapping))) + theme(legend.position = "none")
+
+h_clust <- diff_som_no_scale$fs$data %>% cor() %>% dist() %>% hclust()
+
+library(plotly)
+
+fig <- grid_clustering_df %>% plot_ly(x = ~FJComp.Indo.1..Violet..A, y = ~FSC.H, z = ~SSC.W,
+               marker = list(color = ~FJComp.Indo.1..Violet..A, colorscale = c('#FFE1A1', '#683531'), showscale = TRUE))
+fig <- fig %>% add_markers()
+fig <- fig %>% layout(scene = list(xaxis = list(title = 'FJComp.Indo.1..Violet..A'),
+                                   yaxis = list(title = 'FSC.H'),
+                                   zaxis = list(title = 'SSC.W')),
+                      annotations = list(
+                        x = 1.13,
+                        y = 1.05,
+                        text = 'Step 1',
+                        xref = 'paper',
+                        yref = 'paper',
+                        showarrow = FALSE
+                        ))
+```
+
+```{r}
+library(ggdendro)
+```
+
+
+
+
+
+
+
+# Gradient boosting
+```{r}
+# Modeling packages
+library(gbm)      # for original implementation of regular and stochastic GBMs
+library(h2o)      # for a java-based implementation of GBM variants
+library(xgboost)  # for fitting extreme gradient boosting
+
+
+EmbedSOM_results_df_sub <- EmbedSOM_results_df %>% dplyr::select(c(FSC.A.y, FSC.H.y, SSC.A.y, SSC.W.y, FJComp.Indo.1..Violet..A.y, first_gate))
+
+ames_gbm1 <- gbm(
+  formula = first_gate ~ .,
+  data = EmbedSOM_results_df_sub,
+  distribution = "gaussian",  # SSE loss function
+  n.trees = 5000,
+  shrinkage = 0.1,
+  interaction.depth = 3,
+  n.minobsinnode = 10,
+  cv.folds = 10
+)
+```
+
+
+# Sets of rules without SOM
+```{r}
+facs_data_df
+FSC.A_threshold = 1
+FSC.H_threshold = 1
+SSC.A_threshold = 1
+SSC.W_threshold = 1
+via_threshold = 1
+
+optimize_rules_step_1_no_SOM <- function(facs_data_df, FSC.A_threshold = 1, FSC.H_threshold = 1, SSC.A_threshold = 1, SSC.W_threshold = 1, via_threshold = 1){
+  
+  selected_rows <- facs_data_df %>%
+  dplyr::filter(FSC.A < FSC.A_threshold) %>%
+  dplyr::filter(FSC.H < FSC.H_threshold) %>%
+  dplyr::filter(SSC.A < SSC.A_threshold) %>%
+  dplyr::filter(SSC.W < SSC.W_threshold) %>%
+  dplyr::filter(Indo.1..Violet..A < via_threshold) %>% 
+  rownames_to_column() %>% 
+  dplyr::select(rowname) %>% 
+  pull()
+  
+  live_df <- facs_data_df %>%
+    rownames_to_column() %>% 
+  mutate(classification = case_when(c(rowname %in% selected_rows) ~ "live")) %>%
+  mutate(classification = classification %>% if_else(condition = is.na(classification), true = "not_live", false = "live")) %>%
+  mutate(classification = classification %>% as_factor() %>% fct_relevel(c("live", "not_live"))) %>% 
+  mutate(first_gate = first_gate %>% as_factor() %>% fct_relevel(c("live", "not_live")))
+  
+  confusion_matrix <- confusionMatrix(live_df$first_gate, live_df$classification)
+  accuracy <- confusion_matrix$overall[["Accuracy"]]
+  return(accuracy)
+}
+
+# FSC.A_threshold = 0.9 or 1 =-> accuracy = 0.77
+FSC_A <- data.frame(
+  accuracy = purrr::map(1:100, function(i) optimize_rules_step_1_no_SOM(facs_data_df, FSC.A_threshold = i/100)) %>% unlist(),
+  threshold = (1:100)/100
+)
+
+FSC_A %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+# FSC.H_threshold = 0.6 to 1 -> accuracy = 0.77
+FSC_H <- data.frame(
+  accuracy = purrr::map(1:100, function(i) optimize_rules_step_1_no_SOM(facs_data_df, FSC.H_threshold = i/100)) %>% unlist(),
+  threshold = (1:100)/100
+)
+
+FSC_H %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+# SSC.A_threshold = 0.8 to 1 -> accuracy = 0.77
+SSC_A <- data.frame(
+  accuracy = purrr::map(1:100, function(i) optimize_rules_step_1_no_SOM(facs_data_df, SSC.A_threshold = i/100)) %>% unlist(),
+  threshold = (1:100)/100
+)
+
+SSC_A %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+# SSC.W_threshold = .5 to 1 -> accuracy = 0.77
+SSC_W <- data.frame(
+  accuracy = purrr::map(1:100, function(i) optimize_rules_step_1_no_SOM(facs_data_df, SSC.W_threshold = i/100)) %>% unlist(),
+  threshold = (1:100)/100
+)
+
+SSC_W %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+# SSC.W_threshold = .9 to 1 -> accuracy = 0.77
+via <- data.frame(
+  accuracy = purrr::map(1:100, function(i) optimize_rules_step_1_no_SOM(facs_data_df, via_threshold = i/100)) %>% unlist(),
+  threshold = (1:100)/100
+)
+                  
+via %>% ggplot(aes(x = threshold, y = accuracy)) + geom_line()
+
+optimize_rules_step_1_no_SOM(facs_data_df = facs_data_df, FSC.A_threshold = 1, FSC.H_threshold = 1, SSC.A_threshold = 1, SSC.W_threshold = 1, via_threshold = .8)
+
+```
+
+
+
+
+# More complex - 3 steps at once
+# from https://stackoverflow.com/questions/18400432/creating-multi-column-legend-in-ggplot/18400725#18400725
+```{r, cache = TRUE}
+# following Vesanto's paper
+vesanto_dim <- diff_som$fs$data %>% nrow() %>% sqrt() %>% "*"(5)
+grid_dim <- vesanto_dim %>% sqrt() %>% ceiling()
+
+# tic()
+# reseed()
+# ds2_clog_cell_singlets_1_2 <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = c("SSC.A", "FSC.A", "FSC.H", "SSC.W", "FJComp.Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 3), nclust = grid_dim*grid_dim, rlen = 5)
+# toc()
+
+tic()
+reseed()
+ds2_clog_cell_singlets_1_2 <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = c(1:18), importance = rep(1, 18), nclust = grid_dim*grid_dim, rlen = 5)
+toc()
+
+cl <- ds2_clog_cell_singlets_1_2$map$codes %>% stats::dist() %>% stats::hclust()
+cl_list <- list(height=cl$height, merge=cl$merge, order=cl$order)
+cl_list$order %>% range()
+
+# png("prez-level1.png", width = 3000, height = 2000, pointsize = 24)
+ds2_clog_cell_singlets_1_2 %>% Plot(alpha = .3, clusters = F, cols = c(4, 1, 2, 6, 12), mfrow = c(3, 3))
+ds2_clog_cell_singlets_1_2 %>% PlotAnnotated(size.text = 2, alpha = .4, clusterMap = c(1, 4, 3, 4, 5, 5), annotation = c("clog-_cells-", "clog+", "dead", "live", "S1-", "S2-"))
+# dev.off()
+
+ds2_clog_cell_singlets_1_2 %>% PlotClusters(alpha = 0.3)
+ds2_clog_cell_singlets_1_2 %>% PlotExprs(clusters = T)
+
+ds2_clog_cell_singlets_1_2$e %>% dim()
+ds2_clog_cell_singlets_1_2$fs$data %>% dim()
+ds2_clog_cell_singlets_1_2$map$grid %>% dim()
+ds2_clog_cell_singlets_1_2$map$codes %>% dim()
+ds2_clog_cell_singlets_1_2$map$mapping %>% dim()
+
+grid_clustering_df <- ds2_clog_cell_singlets_1_2$map$grid %>% as.data.frame() %>% rownames_to_column() %>% mutate(cluster = ds2_clog_cell_singlets_1_2$clust) %>% mutate(rowname = rowname %>% as.numeric())
+
+EmbedSOM_results_df <- ds2_clog_cell_singlets_1_2$fs$data %>% as.data.frame() %>% mutate(mapping = ds2_clog_cell_singlets_1_2$map$mapping[, 1]) %>% full_join(grid_clustering_df, by = c("mapping" = "rowname")) %>% mutate(first_gate = facs_data_df$first_gate)
+
+table(EmbedSOM_results_df$cluster,EmbedSOM_results_df$first_gate)
+
+cluster_cell_type_table <- table(EmbedSOM_results_df$cluster,EmbedSOM_results_df$first_gate) %>% as.data.frame() %>% group_by(Var1) %>% top_n(n = 1)
+
+# EmbedSOM_results_df <- EmbedSOM_results_df %>% mutate(class_prediction = cluster %>% recode("1" = "clog-_cells-", "2" = "live", "3" = "dead", "4" = "live", "5" = "S1-", "6" = "S1-"))
+
+EmbedSOM_results_df <- EmbedSOM_results_df %>% mutate(class_prediction = cluster %>% recode("1" = "clog-_cells-", "2" = "live", "3" = "live", "4" = "S1-", "5" = "live", "6" = "dead"))
+
+# EmbedSOM_results_df <- EmbedSOM_results_df %>% 
+#   mutate(class_prediction = cluster %>% recode(
+#     as.character(cluster_cell_type_table$Var1[1]) = as.character(cluster_cell_type_table$Var2[1]), 
+#     as.character(cluster_cell_type_table$Var1[2]) = as.character(cluster_cell_type_table$Var2[2]),
+#     as.character(cluster_cell_type_table$Var1[3]) = as.character(cluster_cell_type_table$Var2[3]),
+#     as.character(cluster_cell_type_table$Var1[4]) = as.character(cluster_cell_type_table$Var2[4]),
+#     as.character(cluster_cell_type_table$Var1[5]) = as.character(cluster_cell_type_table$Var2[5]),
+#     as.character(cluster_cell_type_table$Var1[6]) = as.character(cluster_cell_type_table$Var2[6])
+#                                                )
+#          )
+#                                                                                             
+                                                                                         
+
+table(EmbedSOM_results_df$first_gate, EmbedSOM_results_df$class_prediction)
+
+EmbedSOM_results_df <- EmbedSOM_results_df %>% mutate(first_gate = first_gate %>% factor(levels = c("clog-_cells-", "clog+", "dead", "live", "S1-", "S2-")),
+                                                      class_prediction = class_prediction %>% factor(levels = c("clog-_cells-", "clog+", "dead", "live", "S1-", "S2-")))
+
+caret::confusionMatrix(EmbedSOM_results_df$first_gate, EmbedSOM_results_df$class_prediction)
+```
+
+```{r}
+library(partykit)
+
+facs_data_df_1 <- facs_data_df %>% dplyr::select(c("FSC.A", "FSC.H", "FSC.W", "SSC.A", "SSC.H", "SSC.W", "Indo.1..Violet..A", "first_gate")) %>% as.data.frame()
+
+ct <- ctree(first_gate ~ ., data = facs_data_df_1)
+
+facs_data_df %>% dplyr::select(c("FSC.A", "FSC.H", "FSC.W", "SSC.A", "SSC.H", "SSC.W", "Indo.1..Violet..A", "cell_type")) %>% dplyr::filter("Indo.1..Violet..A "> 0.8)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+mean_FSC.A <- grid_clustering_df$FSC.A %>% range() %>% mean()
+mean_FSC.H <- grid_clustering_df$FSC.H %>% range() %>% mean()
+mean_FSC.W <- grid_clustering_df$FSC.W %>% range() %>% mean()
+mean_SSC.A <- grid_clustering_df$SSC.A %>% range() %>% mean()
+mean_SSC.H <- grid_clustering_df$SSC.H %>% range() %>% mean()
+mean_SSC.W <- grid_clustering_df$SSC.W %>% range() %>% mean()
+mean_via <- grid_clustering_df$FJComp.Indo.1..Violet..A %>% range() %>% mean()
+
+selected_neurons <- grid_clustering_df %>%
+  dplyr::filter(FSC.A < mean_FSC.A) %>%
+  dplyr::filter(FSC.H < mean_FSC.H) %>%
+  dplyr::filter(FSC.W < mean_FSC.W) %>%
+  dplyr::filter(SSC.A < mean_SSC.A) %>%
+  dplyr::filter(SSC.H < mean_SSC.H) %>%
+  dplyr::filter(SSC.W < mean_SSC.W) %>%
+  dplyr::filter(FJComp.Indo.1..Violet..A < mean_via) %>% 
+  dplyr::select(rowname) %>% 
+  pull()
+
+selected_neurons <- grid_clustering_df %>%
+  dplyr::filter(FSC.A < FSC.A %>% quantile(.5)) %>%
+  dplyr::filter(FSC.H < FSC.H %>% quantile(.5)) %>%
+  dplyr::filter(FSC.W < FSC.W %>% quantile(.5)) %>%
+  dplyr::filter(SSC.A < SSC.A %>% quantile(.5)) %>%
+  dplyr::filter(SSC.H < SSC.H %>% quantile(.5)) %>%
+  dplyr::filter(SSC.W < SSC.W %>% quantile(.25)) %>%
+  dplyr::filter(FJComp.Indo.1..Violet..A < FJComp.Indo.1..Violet..A %>% quantile(.5)) %>% 
+  dplyr::select(rowname) %>% 
+  pull()
+
+live_df <- EmbedSOM_results_df %>%
+  mutate(classification = case_when(c(mapping %in% selected_neurons) ~ "live")) %>%
+  mutate(classification = classification %>% if_else(condition = is.na(classification), true = "not_live", false = "live")) %>%
+  mutate(classification = classification %>% as_factor()) %>% 
+  mutate(first_gate = first_gate %>% as_factor())
+  
+confusionMatrix(live_df$first_gate, live_df$classification)
+
+
+optimize_rules_step_1 <- function(EmbedSOM_results_df, grid_clustering_df, FSC.A_quant = 1, FSC.H_quant = 1, SSC.A_quant = 1, SSC.W_quant = 1, via_quant = 1){
+  selected_neurons <- grid_clustering_df %>%
+  dplyr::filter(FSC.A < FSC.A %>% quantile(FSC.A_quant)) %>%
+  dplyr::filter(FSC.H < FSC.H %>% quantile(FSC.H_quant)) %>%
+  dplyr::filter(SSC.A < SSC.A %>% quantile(SSC.A_quant)) %>%
+  dplyr::filter(SSC.W < SSC.W %>% quantile(SSC.W_quant)) %>%
+  dplyr::filter(FJComp.Indo.1..Violet..A < FJComp.Indo.1..Violet..A %>% quantile(via_quant)) %>% 
+  dplyr::select(rowname) %>% 
+  pull()
+  
+  live_df <- EmbedSOM_results_df %>%
+  mutate(classification = case_when(c(mapping %in% selected_neurons) ~ "live")) %>%
+  mutate(classification = classification %>% if_else(condition = is.na(classification), true = "not_live", false = "live")) %>%
+  mutate(classification = classification %>% as_factor()) %>% 
+  mutate(first_gate = first_gate %>% as_factor() )
+  
+  confusion_matrix <- confusionMatrix(live_df$first_gate, live_df$classification)
+  accuracy <- confusion_matrix$overall[["Accuracy"]]
+  return(accuracy)
+}
+
+purrr::map(1:10, function(i) optimize_rules_step_1(EmbedSOM_results_df, grid_clustering_df, FSC.A_quant = i/10))
+
+EmbedSOM_results_df %>% ggplot(aes(x = FSC.A.x)) + geom_histogram(bins = 100) + geom_density(fill= "blue")
+
+purrr::map(1:10, function(i) optimize_rules_step_1(EmbedSOM_results_df, grid_clustering_df, FSC.H_quant = i/10))
+
+purrr::map(1:10, function(i) optimize_rules_step_1(EmbedSOM_results_df, grid_clustering_df, SSC.A_quant = i/10))
+
+purrr::map(1:10, function(i) optimize_rules_step_1(EmbedSOM_results_df, grid_clustering_df, SSC.W_quant = i/10))
+
+purrr::map(1:10, function(i) optimize_rules_step_1(EmbedSOM_results_df, grid_clustering_df, via_quant = i/10))
+
+EmbedSOM_results_df %>% ggplot(aes(x = FJComp.Indo.1..Violet..A.x)) + geom_histogram(bins = 100) + geom_density(fill= "blue")
+
+optimize_rules_step_1(EmbedSOM_results_df = EmbedSOM_results_df, grid_clustering_df = grid_clustering_df, FSC.A_quant = .9, FSC.H_quant = .9, SSC.A_quant = .8, SSC.W_quant = .8, via_quant = .6)
+
+```
+
+
+
+# Add the  C5.0 tuning paramete minCases to caret
+```{r}
+C5CustomSort <- function(x) {
+  x$model <- factor(as.character(x$model), levels = c("rules", "tree"))
+  x[order(x$trials, x$model, x$splits, !x$winnow), ]
+}
+
+C5CustomLoop <- function(grid) {
+  loop <- ddply(grid, c("model", "winnow", "splits"), function(x) c(trials = max(x$trials)))
+  submodels <- vector(mode = "list", length = nrow(loop))
+  for (i in seq(along = loop$trials)) {
+    index <- which(grid$model == loop$model[i] & grid$winnow ==
+      loop$winnow[i] & grid$splits == loop$splits[i])
+    trials <- grid[index, "trials"]
+    submodels[[i]] <- data.frame(trials = trials[trials !=
+      loop$trials[i]])
+  }
+  list(loop = loop, submodels = submodels)
+}
+
+C5CustomGrid <- function(x, y, len = NULL) {
+  c5seq <- if (len == 1) 1 else c(1, 10 * ((2:min(len, 11)) - 1))
+  expand.grid(trials = c5seq, splits = c(2, 10, 20, 50), winnow = c(TRUE, FALSE), model = c("tree", "rules"))
+}
+
+C5CustomFit <- function(x, y, wts, param, lev, last, classProbs, ...) {
+  # add the splits parameter to the fit function
+  # minCases is a function of splits
+
+  theDots <- list(...)
+
+  splits <- param$splits
+  minCases <- floor(length(y) / splits) - 1
+
+  if (any(names(theDots) == "control")) {
+    theDots$control$winnow <- param$winnow
+    theDots$control$minCases <- minCases
+    theDots$control$earlyStopping <- FALSE
+  }
+  else {
+    theDots$control <- C5.0Control(winnow = param$winnow, minCases = minCases, earlyStopping = FALSE)
+  }
+
+  argList <- list(x = x, y = y, weights = wts, trials = param$trials, rules = param$model == "rules")
+
+  argList <- c(argList, theDots)
+
+  do.call("C5.0.default", argList)
+}
+
+GetC5Info <- function() {
+
+  # get the default C5.0 model functions
+  c5ModelInfo <- getModelInfo(model = "C5.0", regex = FALSE)[[1]]
+
+  # modify the parameters data frame so that it includes splits
+  c5ModelInfo$parameters$parameter <- factor(c5ModelInfo$parameters$parameter, levels = c(levels(c5ModelInfo$parameters$parameter), "splits"))
+  c5ModelInfo$parameters$label <- factor(c5ModelInfo$parameters$label, levels = c(levels(c5ModelInfo$parameters$label), "Splits"))
+  c5ModelInfo$parameters <- rbind(c5ModelInfo$parameters, c("splits", "numeric", "Splits"))
+
+  # replace the default c5.0 functions with ones that are aware of the splits parameter
+  c5ModelInfo$fit <- C5CustomFit
+  c5ModelInfo$loop <- C5CustomLoop
+  c5ModelInfo$grid <- C5CustomGrid
+  c5ModelInfo$sort <- C5CustomSort
+
+  return(c5ModelInfo)
+}
+```
+
+```{r}
+c5info <- GetC5Info()
+
+# Define the structure of cross validation
+fitControl <- trainControl(method = "cv", number = 10)
+
+# create a custom cross validation grid
+# grid <- expand.grid(.winnow = c(TRUE, FALSE), .trials = c(1, 5, 10, 15, 20), .model = c("tree"), .splits = c(2, 5, 10, 15, 20, 25, 50, 100), .rules = c(TRUE, FALSE))
+grid <- expand.grid(.winnow = c(TRUE, FALSE), .trials = c(1, 5, 10, 15, 20), .model = c("tree"), .splits = c(2, 5, 10, 15, 20, 25, 50, 100))
+
+# Choose the features and classes
+features <- facs_data_df %>% dplyr::select(-c(first_gate, cell_type))
+classes <- facs_data_df$first_gate %>% factor()
+
+# Make it parallel
+cl <- makePSOCKcluster(6)
+registerDoParallel(cl)
+
+# Tune and fit model
+model <- train(x = features, y = classes, tuneGrid = grid, trControl = fitControl, method = c5info, verbose = TRUE)
+
+stopCluster(cl)
+
+model
+summary(model)
+plot(model)
+```
+

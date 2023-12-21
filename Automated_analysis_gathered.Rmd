@@ -1,0 +1,204 @@
+---
+title: "Automated_analysis_gathered"
+author: "Carlos Eduardo Madureira Trufen"
+date: "7/15/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r, message=FALSE, warning=FALSE, cache=TRUE}
+library(bestNormalize, warn.conflicts = FALSE)
+library(C50, warn.conflicts = FALSE)
+library(caret, warn.conflicts = FALSE)
+library(corrplot, warn.conflicts = FALSE)
+library(clusterCrit, warn.conflicts = FALSE)
+library(CytoML, warn.conflicts = FALSE)
+library(DiffSOM, warn.conflicts = FALSE)
+library(doParallel, warn.conflicts = FALSE)
+library(EmbedSOM, warn.conflicts = FALSE)
+library(FactoMineR, warn.conflicts = FALSE)
+library(factoextra, warn.conflicts = FALSE)
+library(flowClean, warn.conflicts = FALSE)
+library(flowCore, warn.conflicts = FALSE)
+library(flowClust, warn.conflicts = FALSE)
+library(flowStats, warn.conflicts = FALSE)
+library(flowViz, warn.conflicts = FALSE)
+library(flowWorkspace, warn.conflicts = FALSE)
+library(FlowSOM, warn.conflicts = FALSE)
+library(furrr, warn.conflicts = FALSE)
+library(ggcyto, warn.conflicts = FALSE)
+library(HDclassif, warn.conflicts = FALSE)
+library(kohonen, warn.conflicts = FALSE)
+library(microbenchmark, warn.conflicts = FALSE)
+library(parallel, warn.conflicts = FALSE)
+library(parallelMap, warn.conflicts = FALSE)
+library(profvis, warn.conflicts = FALSE)
+library(RColorBrewer, warn.conflicts = FALSE)
+library(Rcpp11, warn.conflicts = FALSE)
+library(tictoc, warn.conflicts = FALSE)
+library(tidyverse, warn.conflicts = FALSE)
+library(yasomi, warn.conflicts = FALSE)
+# source("~/PRIMUS/home/trufenc/new_SOM_functions.R")
+source("/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=home/trufenc/new_SOM_functions.R")
+```
+
+```{r}
+scale_to_range_0_1 <- function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+```
+
+```{r}
+diff_som_1 <-  readRDS("~/Documents/diff_som_1.rds")
+facs_data_subset_df <- vroom::vroom("~/Documents/facs_data_subset_df_step_1.tsv", delim = "\t")
+```
+
+```{r}
+perform_SOM <- function(diff_som, facs_data_df, columns_to_use = c("FITC.A", "Qdot.605.A", "Pacific.Blue.A", "APC.A", "PE.Cy7.A", "PE.Texas.Red.A", "BV786.A", "PerCP.Cy5.5.A"), importance = rep(1, 8), normalize_weights = TRUE, class_column, ...) {
+  
+  scale_to_range_0_1 <- function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+  
+  diff_som = diff_som
+  
+  # calculate optimal grid
+  vesanto_dim <- diff_som$fs$data %>%
+    nrow() %>%
+    sqrt() %>%
+    "*"(5)
+  
+  grid_dim <- vesanto_dim %>%
+    sqrt() %>%
+    ceiling() %>%
+    "+"(20)
+
+  # SOM
+  reseed()
+  ds <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = columns_to_use, importance = importance, nclust = grid_dim * grid_dim, rlen = 5)
+
+  # Optional to normalize weights
+  if (normalize_weights) {
+    ds$map$codes <- purrr::map(seq_len(ncol(ds$map$codes)), function(i) {ds$map$codes[, i] %>% bestNormalize::orderNorm() %>% .[["x.t"]] %>% scale_to_range_0_1()}) %>% purrr::set_names(colnames(ds$map$codes)) %>% bind_cols()
+  }
+
+  grid_clustering_df <- ds$map$grid %>%
+    as.data.frame() %>%
+    rownames_to_column() %>%
+    mutate(cluster = ds$clust) %>%
+    mutate(rowname = rowname %>% as.numeric()) %>%
+    bind_cols(as.data.frame(ds$map$codes))
+
+  EmbedSOM_results_df <- ds$fs$data %>%
+    as.data.frame() %>%
+    mutate(mapping = ds$map$mapping[, 1]) %>%
+    left_join(grid_clustering_df, by = c("mapping" = "rowname")) %>%
+    mutate(!!class_column := facs_data_df[[class_column]])
+  
+    EmbedSOM_results_df <- EmbedSOM_results_df %>% 
+    dplyr::select(c(dplyr::contains(".y"), class_column)) %>% 
+    purrr::set_names(str_remove(string = colnames(.), pattern = ".y"))
+  
+  output <- list(weights_df = EmbedSOM_results_df,
+                 diff_som = ds)
+  
+  return(output)
+}
+```
+
+# C5.0 on SOM
+```{r}
+# class_column <- "first_gate"
+# weights_df <- EmbedSOM_results_whole_data$weights_df
+
+process_C5_from_SOM <- function(weights_df, class_column, ...){  
+  library(tidyverse, warn.conflicts = FALSE)
+  library(caret, warn.conflicts = FALSE)
+  library(C50, warn.conflicts = FALSE)
+
+  classes <- weights_df[[class_column]] %>% factor()
+  
+  weights_df <- weights_df %>% dplyr::select(-class_column)
+  
+  rules_model <- C5.0(x = weights_df, y = classes, trials = 1, rules = TRUE)
+
+  return(rules_model)
+}
+```
+
+Load table
+```{r}
+library(vroom)
+
+# facs_data_df_step_2 %>% write.csv("~/Documents/imbalanced_facs_data_df_step_2.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+tic()
+facs_data_df_step_2 <- vroom::vroom(file = "~/Documents/imbalanced_facs_data_df_step_2.tsv", delim = ",")
+toc()
+step_2_levels <- facs_data_df_step_2$second_gate %>% unique()
+
+tic()
+balanced_facs_data_df_step_2 <- vroom::vroom(file = "~/Documents/balanced_facs_data_df_step_2.tsv", delim = "\t")
+toc()
+facs_data_df_step_2 <- balanced_facs_data_df_step_2
+
+
+test_facs_data_df_step_2 <- vroom::vroom(file = "~/Documents/test_facs_data_df_step_2.tsv", delim = "\t")
+
+test_df <- test_facs_data_df_step_2 %>% dplyr::select(-c(second_gate))
+```
+
+```{r}
+facs_data_df <- vroom::vroom("~/Documents/facs_data_df_complete_step_2.tsv")
+```
+
+
+```{r}
+EmbedSOM_results_train <- readRDS("~/Documents/EmbedSOM_results_train_step_2.rds")
+EmbedSOM_results_test <- readRDS("~/Documents/EmbedSOM_results_test_step_2.rds")
+```
+
+# Load diff_som and test_diff_som
+```{r}
+diff_som_2 <- readRDS(file = "~/Documents/diff_som_1_2020_07_10.rds")
+test_diff_som <- readRDS(file = "~/Documents/test_diff_som_2020_07_10.rds")
+test_facs_data_df_step_2 <- vroom::vroom(file = "~/Documents/test_facs_data_df_step_2.tsv", delim = "\t")
+test_df <- test_facs_data_df_step_2 %>% dplyr::select(-c(second_gate))
+```
+
+# Since the winner strategy is SOM - selected features - normalize weights, let's apply it to the whole dataset:
+```{r}
+tic()
+EmbedSOM_results_whole_data <- perform_SOM(diff_som = diff_som_1, facs_data_df = facs_data_subset_df, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE, class_column = "first_gate")
+toc()
+
+tic()
+step_1_rules_models_SOM_selected_features <- process_C5_from_SOM(weights_df = EmbedSOM_results_whole_data$weights_df, class_column = "first_gate")
+toc()
+
+# new data
+# test_diff_som$fs$data <- test_diff_som$fs$data %>% 
+#   as.data.frame() %>% 
+#   purrr::set_names(str_remove(string = colnames(test_diff_som$fs$data), pattern = "FJComp.")) %>% 
+#   as.matrix()
+
+test_diff_som$fs$data <- facs_data_df %>% dplyr::select(-c(cell_type, first_gate, second_gate)) %>% as.matrix()
+
+# test_df <- facs_test_data_df %>% dplyr::select(-c(cell_type, first_gate))
+# test_df <- facs_test_data_df %>% dplyr::select(-c(cell_type, first_gate))
+
+facs_test_data_df <- facs_data_df
+
+# 596.82
+tic()
+EmbedSOM_results_testing <- perform_SOM(diff_som = test_diff_som, facs_data_df = facs_test_data_df %>% dplyr::select(-c(cell_type, second_gate)), columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE, class_column = "first_gate")
+toc()
+
+tic()
+selected_features_SOM_classification <- predict(step_1_rules_models_SOM_selected_features, newdata = facs_test_data_df %>% dplyr::select(-c(cell_type, first_gate, second_gate)))
+toc()
+
+caret::confusionMatrix(selected_features_SOM_classification, facs_test_data_df$first_gate %>% factor())
+```

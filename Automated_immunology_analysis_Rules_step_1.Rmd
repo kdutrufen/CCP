@@ -1,0 +1,2411 @@
+---
+title: "Automated_immunology_analysis_Rules"
+author: "Carlos Eduardo Madureira Trufen"
+date: "6/5/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r, message=FALSE, warning=FALSE}
+library(bestNormalize, warn.conflicts = FALSE)
+library(C50, warn.conflicts = FALSE)
+library(caret, warn.conflicts = FALSE)
+library(corrplot, warn.conflicts = FALSE)
+library(clusterCrit, warn.conflicts = FALSE)
+library(CytoML, warn.conflicts = FALSE)
+library(DiffSOM, warn.conflicts = FALSE)
+library(doParallel, warn.conflicts = FALSE)
+library(EmbedSOM, warn.conflicts = FALSE)
+library(FactoMineR, warn.conflicts = FALSE)
+library(factoextra, warn.conflicts = FALSE)
+library(flowClean, warn.conflicts = FALSE)
+library(flowCore, warn.conflicts = FALSE)
+library(flowClust, warn.conflicts = FALSE)
+library(flowStats, warn.conflicts = FALSE)
+library(flowViz, warn.conflicts = FALSE)
+library(flowWorkspace, warn.conflicts = FALSE)
+library(FlowSOM, warn.conflicts = FALSE)
+library(furrr, warn.conflicts = FALSE)
+library(ggcyto, warn.conflicts = FALSE)
+library(HDclassif, warn.conflicts = FALSE)
+library(kohonen, warn.conflicts = FALSE)
+library(microbenchmark, warn.conflicts = FALSE)
+library(parallel, warn.conflicts = FALSE)
+library(parallelMap, warn.conflicts = FALSE)
+library(profvis, warn.conflicts = FALSE)
+library(RColorBrewer, warn.conflicts = FALSE)
+library(Rcpp11, warn.conflicts = FALSE)
+library(tictoc, warn.conflicts = FALSE)
+library(tidyverse, warn.conflicts = FALSE)
+library(yasomi, warn.conflicts = FALSE)
+# source("~/PRIMUS/home/trufenc/new_SOM_functions.R")
+# source("/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=home/trufenc/new_SOM_functions.R")
+
+source_path <- "~/PRIMUS/"
+# source_path <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share="
+
+source(paste0(source_path, "home/trufenc/new_SOM_functions.R"))
+```
+
+```{r scale_to_range_0_1}
+scale_to_range_0_1 <- function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+```
+
+```{r build_fcs_data_df}
+build_fcs_data_df <- function(cell_types, diff_som) {
+  
+  cell_types_df <- cell_types %>%
+    as.data.frame() %>%
+    # rownames_to_column() %>%
+    # dplyr::rename("cell_types" = ".", "File" = "rowname") %>%
+    dplyr::rename("cell_types" = ".")
+    # mutate(File = File %>% as.numeric())
+
+  cell_types_df <- cell_types_df %>%
+    mutate(cell_types = cell_types %>% recode(
+      "clog--" = "clog+",
+      "clog-_cells-" = "cells-",
+      "cells_S1-" = "S1-",
+      "S2_dead" = "dead",
+      "S1_S2-" = "S2-",
+      "NK_Eff_Klrg1+-" = "NK_Eff_Klrg1-",
+      "NK_Res_Klrg1+-" = "NK_Res_Klrg1-",
+      "NK_neg_Klrg1+-" = "NK_neg_Klrg1-",
+      "gd_Eff_Klrg1+" = "gdTCR_Eff_Klrg1+",
+      "gd_Eff_Klrg1+-" = "gdTCR_Eff_Klrg1-",
+      "gd_Res_Klrg1+" = "gdTCR_Res_Klrg1+",
+      "gd_Res_Klrg1+-" = "gdTCR_Res_Klrg1-",
+      "gd_neg_Klrg1+" = "gdTCR_neg_Klrg1+",
+      "gd_neg_Klrg1+-" = "gdTCR_neg_Klrg1-",
+      "CD4-NKT_Eff_Klrg1+-" = "CD4-NKT_Eff_Klrg1-",
+      "CD4-NKT_Res_Klrg1+-" = "CD4-NKT_Res_Klrg1-",
+      "CD4-NKT_neg_Klrg1+-" = "CD4-NKT_neg_Klrg1-",
+      "CD4+NKT_Eff_Klrg1+-" = "CD4+NKT_Eff_Klrg1-",
+      "CD4+NKT_Res_Klrg1+-" = "CD4+NKT_Res_Klrg1-",
+      "CD4+NKT_neg_Klrg1+-" = "CD4+NKT_neg_Klrg1-",
+      "Th_Eff_Klrg1+-" = "Th_Eff_Klrg1-",
+      "Th_Res_Klrg1+-" = "Th_Res_Klrg1-",
+      "Th_neg_Klrg1+-" = "Th_neg_Klrg1-",
+      "Treg_Eff_Klrg1+-" = "Tregs_Eff_Klrg1-",
+      "Treg_Res_Klrg1+-" = "Tregs_Res_Klrg1-",
+      "Treg_neg_Klrg1+-" = "Tregs_neg_Klrg1-",
+      "Treg_Eff_Klrg1+" = "Tregs_Eff_Klrg1+",
+      "Treg_Res_Klrg1+" = "Tregs_Res_Klrg1+",
+      "Treg_neg_Klrg1+" = "Tregs_neg_Klrg1+",
+      "CD8_Naive_Klrg1-_VM Tcells" = "CD8_Naive_Klrg1-_VM Tcells+",
+      "CD8_Naive_Klrg1+_VM Tcells" = "CD8_Naive_Klrg1+_VM Tcells+",
+      "CD8_Eff_Klrg1-_VM Tcells" = "CD8_Eff_Klrg1-_VM Tcells+",
+      "CD8_Eff_Klrg1+_VM Tcells" = "CD8_Eff_Klrg1+_VM Tcells+",
+      "CD8_Res_Klrg1-_VM Tcells" = "CD8_Res_Klrg1-_VM Tcells+",
+      "CD8_Res_Klrg1+_VM Tcells" = "CD8_Res_Klrg1+_VM Tcells+",
+      "CD8_neg_Klrg1-_VM Tcells" = "CD8_neg_Klrg1-_VM Tcells+",
+      "CD8_neg_Klrg1+_VM Tcells" = "CD8_neg_Klrg1+_VM Tcells+",
+      "CD8+_Eff_Klrg1-_VM Tcells-" = "CD8_Eff_Klrg1-_VM Tcells-",
+      "CD8+_Eff_Klrg1+_VM Tcells" = "CD8_Eff_Klrg1+_VM Tcells+",
+      "CD8+_Eff_Klrg1+_VM Tcells-" = "CD8_Eff_Klrg1+_VM Tcells-",
+      "CD8+_Naive_Klrg1-_VM Tcells" = "CD8_Naive_Klrg1-_VM Tcells+",
+      "CD8+_Naive_Klrg1-_VM Tcells-" = "CD8_Naive_Klrg1-_VM Tcells-",
+      "CD8+_Naive_Klrg1+_VM Tcells" = "CD8_Naive_Klrg1+_VM Tcells+",
+      "CD8+_Naive_Klrg1+_VM Tcells-" = "CD8_Naive_Klrg1+_VM Tcells-",
+      "CD8+_neg_Klrg1-_VM Tcells" = "CD8_neg_Klrg1-_VM Tcells+",
+      "CD8+_neg_Klrg1-_VM Tcells-" = "CD8_neg_Klrg1-_VM Tcells-",
+      "CD8+_neg_Klrg1+_VM Tcells" = "CD8_neg_Klrg1+_VM Tcells+",
+      "CD8+_neg_Klrg1+_VM Tcells-" = "CD8_neg_Klrg1+_VM Tcells-",
+      "CD8+_Res_Klrg1-_VM Tcells" = "CD8_Res_Klrg1-_VM Tcells+",
+      "CD8+_Res_Klrg1-_VM Tcells-" = "CD8_Res_Klrg1-_VM Tcells-",
+      "CD8+_Res_Klrg1+_VM Tcells" = "CD8_Res_Klrg1+_VM Tcells+",
+      "CD8+_Res_Klrg1+_VM Tcells-" = "CD8_Res_Klrg1+_VM Tcells-"
+    ))
+
+  # manual_gating <- diff_som$fs$data %>%
+  #   as.data.frame() %>%
+  #   full_join(cell_types_df) %>%
+  #   na.omit() %>%
+  #   dplyr::select(cell_types) %>%
+  #   unlist() %>%
+  #   as.character() %>%
+  #   factor()
+  
+    facs_data_df <- diff_som$fs$data %>%
+    as.data.frame() %>%
+    mutate(cell_type = cell_types_df$cell_types)
+
+  # facs_data_df <- diff_som$fs$data %>%
+  #   as.data.frame() %>%
+  #   dplyr::select(c(1:19))
+  # facs_data_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(to_transform)
+
+  facs_data_df <- facs_data_df %>%
+    purrr::set_names(str_remove(string = names(facs_data_df), pattern = "FJComp."))
+
+  # facs_data_df <- facs_data_df %>%
+  #   mutate(cell_type = manual_gating)
+  
+  return(facs_data_df)
+}
+```
+
+```{r perform_SOM}
+perform_SOM <- function(diff_som, facs_data_df, columns_to_use = c("FITC.A", "Qdot.605.A", "Pacific.Blue.A", "APC.A", "PE.Cy7.A", "PE.Texas.Red.A", "BV786.A", "PerCP.Cy5.5.A"), importance = rep(1, 8), normalize_weights = TRUE, class_column, ...) {
+  
+  scale_to_range_0_1 <- function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+  
+  diff_som = diff_som
+  
+  # calculate optimal grid
+  vesanto_dim <- diff_som$fs$data %>%
+    nrow() %>%
+    sqrt() %>%
+    "*"(5)
+  
+  grid_dim <- vesanto_dim %>%
+    sqrt() %>%
+    ceiling() %>%
+    "+"(20)
+
+  # SOM
+  reseed()
+  ds <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = columns_to_use, importance = importance, nclust = grid_dim * grid_dim, rlen = 5)
+
+  # Optional to normalize weights
+  if (normalize_weights) {
+    ds$map$codes <- purrr::map(seq_len(ncol(ds$map$codes)), function(i) {ds$map$codes[, i] %>% bestNormalize::orderNorm() %>% .[["x.t"]] %>% scale_to_range_0_1()}) %>% purrr::set_names(colnames(ds$map$codes)) %>% bind_cols()
+  }
+
+  grid_clustering_df <- ds$map$grid %>%
+    as.data.frame() %>%
+    rownames_to_column() %>%
+    mutate(cluster = ds$clust) %>%
+    mutate(rowname = rowname %>% as.numeric()) %>%
+    bind_cols(as.data.frame(ds$map$codes))
+
+  EmbedSOM_results_df <- ds$fs$data %>%
+    as.data.frame() %>%
+    mutate(mapping = ds$map$mapping[, 1]) %>%
+    left_join(grid_clustering_df, by = c("mapping" = "rowname")) %>%
+    mutate(!!class_column := facs_data_df[[class_column]])
+  
+    EmbedSOM_results_df <- EmbedSOM_results_df %>% 
+    dplyr::select(c(dplyr::contains(".y"), class_column)) %>% 
+    purrr::set_names(str_remove(string = colnames(.), pattern = ".y$"))
+  
+  output <- list(weights_df = EmbedSOM_results_df,
+                 diff_som = ds)
+  
+  return(output)
+}
+```
+
+path to files
+```{r path_to_files}
+path_to_files <- paste0(source_path, "~/data/83_BIOINFORMATICS/Carlos")
+```
+
+
+```{r}
+path_to_gold_standard_control_files_1 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02672_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_2 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02676_fcs_2020_09_25")
+
+# path_to_gold_standard_control_files_3 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02677_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_3 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02678_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_4 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02679_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_5 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02683_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_6 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02684_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_7 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03540_fcs")
+
+path_to_gold_standard_control_files_8 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03541_fcs")
+
+path_to_gold_standard_control_files_9 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03542_fcs")
+
+path_to_gold_standard_control_files_10 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03564_fcs")
+
+path_to_gold_standard_control_files_11 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02020_fcs")
+
+path_to_gold_standard_control_files_12 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02027_fcs")
+
+path_to_gold_standard_control_files_13 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02042_fcs")
+
+path_to_gold_standard_control_files_14 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02043_fcs")
+
+path_to_gold_standard_control_files_15 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02044_fcs")
+
+path_to_gold_standard_control_files_16 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02045_fcs")
+
+path_to_gold_standard_control_files_17 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02046_fcs")
+
+path_to_gold_standard_control_files_18 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02055_fcs")
+
+path_to_gold_standard_control_files_19 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02056_fcs")
+
+path_to_gold_standard_control_files_20 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02057_fcs")
+
+
+
+path_to_files <- list(path_to_gold_standard_control_files_1,
+                      path_to_gold_standard_control_files_2,
+                      path_to_gold_standard_control_files_3,
+                      path_to_gold_standard_control_files_4,
+                      path_to_gold_standard_control_files_5,
+                      path_to_gold_standard_control_files_6,
+                      path_to_gold_standard_control_files_7,
+                      path_to_gold_standard_control_files_8,
+                      path_to_gold_standard_control_files_9,
+                      path_to_gold_standard_control_files_10,
+                      path_to_gold_standard_control_files_11,
+                      path_to_gold_standard_control_files_12,
+                      path_to_gold_standard_control_files_13,
+                      path_to_gold_standard_control_files_14,
+                      path_to_gold_standard_control_files_15,
+                      path_to_gold_standard_control_files_16,
+                      path_to_gold_standard_control_files_17,
+                      path_to_gold_standard_control_files_18,
+                      path_to_gold_standard_control_files_19,
+                      path_to_gold_standard_control_files_20
+                      )
+
+files <- path_to_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+
+file_names <- path_to_files %>% purrr::map(list.files, pattern = ".fcs")
+
+panel_A_classes <- c(
+  "CD4\\-NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells.fcs",
+  "clog\\-_cells\\-.fcs",
+  "clog\\-\\-.fcs",
+  "dead.fcs",
+  "DN .fcs",
+  "CD5\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+.fcs",
+  "gd_neg_Klrg1\\+\\-.fcs",
+  "gd_neg_Klrg1\\+.fcs",
+  "gd_Res_Klrg1\\+\\-.fcs",
+  "gd_Res_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\+\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\+\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "S1\\-.fcs",
+  "S2\\-.fcs",
+  "Th_Eff_Klrg1\\+\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\+\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\+\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Treg_Eff_Klrg1\\+\\-.fcs",
+  "Treg_Eff_Klrg1\\+.fcs",
+  "Treg_neg_Klrg1\\+\\-.fcs",
+  "Treg_neg_Klrg1\\+.fcs",
+  "Treg_Res_Klrg1\\+\\-.fcs",
+  "Treg_Res_Klrg1\\+.fcs"
+)
+
+
+indices_list <- purrr::map(seq_along(files), function(j) purrr::map(seq_along(panel_A_classes), function(i) files[[j]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist())
+files_to_load_list <- purrr::map(seq_along(files), function(j) files[[j]][indices_list[[j]]])
+files_to_load_names_list <- purrr::map(seq_along(files), function(j) file_names[[j]][indices_list[[j]]])
+files_to_load_list[[9]] <- files_to_load_list[[9]][-c(56)]
+files_to_load_names_list[[9]] <- files_to_load_names_list[[9]][-c(56)]
+files_to_load_list[[13]] <- files_to_load_list[[9]][-c(56)]
+files_to_load_names_list[[13]] <- files_to_load_names_list[[9]][-c(56)]
+# files_to_load_list[[4]] <- files_to_load_list[[4]][-c(6, 24, 28, 48)]
+# files_to_load_names_list[[4]] <- files_to_load_names_list[[4]][-c(6, 24, 28, 48)]
+
+
+# ds <- files_to_load_list[[9]] %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+
+# 1870.653 sec elapsed
+tic()
+diff_som_1 <- files_to_load_list %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+# diff_som_1 %>% saveRDS(file = "~/PRIMUS/home/trufenc/diff_som_12_million_events.rds")
+
+diff_som_1 <- readRDS(file = paste0(source_path, "home/trufenc/diff_som_12_million_events.rds"))
+
+diff_som_1$fs$data <- diff_som_1$fs$data %>% as.data.frame() %>% purrr::set_names(colnames(diff_som_1$fs$data) %>% str_remove(pattern = "FJComp.")) %>% as.matrix()
+
+diff_som_1_normalized <- diff_som_1 %>% pre_process_data()
+
+# diff_som_1_normalized %>% saveRDS(file = "~/PRIMUS/home/trufenc/diff_som_normalized_12_million_events.rds")
+
+diff_som_1_normalized <- readRDS(file = "~/PRIMUS/home/trufenc/diff_som_normalized_12_million_events.rds")
+
+diff_som_1_normalized$fs$data <- diff_som_1_normalized$fs$data %>% as.data.frame() %>% purrr::set_names(colnames(diff_som_1_normalized$fs$data) %>% str_remove(pattern = "FJComp.")) %>% as.matrix()
+
+cell_types_control <- diff_som_1$files %>% 
+  unlist() %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._c....._..._..._")
+
+cell_types <- cell_types_control
+# cell_types[cell_types %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+cell_types <- cell_types[!is.na(cell_types)]
+# files_to_load_list %>% unlist()
+
+facs_data_df <- diff_som_1_normalized %>% build_fcs_data_df(cell_types = cell_types)
+# facs_data_df <- diff_som_1 %>% build_fcs_data_df(cell_types = cell_types)
+
+add_first_gate_column <- function(facs_data_df) {
+  facs_data_df <- facs_data_df %>%
+    mutate(first_gate = case_when(!(cell_type %in% c("clog+", "cells-", "S1-", "S2-", "dead")) ~ "live"))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+  return(facs_data_df)
+}
+
+facs_data_df <- facs_data_df %>% add_first_gate_column()
+
+first_gate_table <- table(facs_data_df$first_gate)
+first_gate_table <- facs_data_df %>% group_by(first_gate) %>% tally()
+
+# sort data
+reseed()
+facs_data_df <- facs_data_df %>% dplyr::slice(sample(nrow(facs_data_df)))
+
+# balance data
+reseed()
+facs_data_df_step_1 <- facs_data_df %>% split(f = .$first_gate) %>% purrr::map(dplyr::slice, sample(5500000)) %>% bind_rows()
+
+# Set train aand test dfs
+reseed()
+train_index_step_1 <- sample(1:nrow(facs_data_df_step_1), 0.7 * nrow(facs_data_df_step_1))
+
+train_df_step_1 <- facs_data_df_step_1[train_index_step_1, ]
+test_df_step_1 <- facs_data_df_step_1[-train_index_step_1, ]
+
+# diff_som_1_normalized$fs$data <- facs_data_subset_df %>% dplyr::select(-c(Time, cell_type, first_gate)) %>% as.matrix()
+diff_som_1$fs$data <- train_df_step_1 %>% dplyr::select(-c(Time, cell_type, first_gate)) %>% as.matrix()
+
+test_diff_som_1 <- diff_som_1
+test_diff_som_1$fs$data <- test_df_step_1 %>% dplyr::select(-c(Time, cell_type, first_gate)) %>% as.matrix()
+
+registerDoParallel(cores = 50)
+# 128.14 sec elapsed, 2 x 140000 events
+# 3253.957 sec elapsed, 2 x 800000 events
+tic()
+EmbedSOM_results_step_1 <- perform_SOM(diff_som = diff_som_1_normalized, facs_data_df =  train_df_step_1, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = rep(1, 5), normalize_weights = TRUE, class_column = "first_gate")
+# EmbedSOM_results_step_1 <- perform_SOM(diff_som = diff_som_1, facs_data_df =  train_df_step_1, columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = FALSE, class_column = "first_gate")
+toc()
+
+# EmbedSOM_results_step_1 %>% saveRDS("~/PRIMUS/home/trufenc/EmbedSOM_results_step_1_12_million.rds")
+
+# EmbedSOM_results_step_1 <- readRDS(paste0(source_path, "home/trufenc/EmbedSOM_results_step_1_12_million.rds"))
+
+EmbedSOM_results_step_1 <- readRDS(paste0(source_path, "home/trufenc/EmbedSOM_results_normalized_step_1_12_million.rds"))
+
+# EmbedSOM_results_step_1 <- readRDS(paste0(source_path, "home/trufenc/EmbedSOM_results_not_normalized_step_1_12_million.rds"))
+
+# 978.945 sec elapsed
+tic()
+test_EmbedSOM_results_step_1 <- perform_SOM(diff_som = diff_som_1_normalized, facs_data_df =  test_df_step_1, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = rep(1, 5), normalize_weights = TRUE, class_column = "first_gate")
+# test_EmbedSOM_results_step_1 <- perform_SOM(diff_som = test_diff_som_1, facs_data_df =  test_df_step_1, columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = FALSE, class_column = "first_gate")
+toc()
+
+test_EmbedSOM_results_step_1 %>% saveRDS(file = paste0(source_path, "home/trufenc/test_EmbedSOM_normalized_results_step_1_12_million.rds"))
+
+# test_EmbedSOM_results_step_1 %>% saveRDS(file = paste0(source_path, "home/trufenc/test_EmbedSOM_results_step_1_12_million.rds"))
+
+# rf_train <- EmbedSOM_results_step_1$weights_df %>% mutate(first_gate = train_df$first_gate %>% factor(levels = c("live", "not_live")))
+
+# rf_train <- train_df %>% mutate(first_gate = first_gate %>% factor(levels = c("live", "not_live")))
+
+# rf_test <- test_EmbedSOM_results_step_1$weights_df  %>% mutate(first_gate = test_df$first_gate %>% factor(levels = c("live", "not_live")))
+
+# rf_test <- test_df  %>% mutate(first_gate = first_gate %>% factor(levels = c("live", "not_live")))
+
+# library(spm)
+# 
+# tic()
+# rf_cv_results <- rgcv(trainx = rf_train %>% dplyr::select(-c(first_gate)), trainy = rf_train$first_gate, num.trees = 500, mtry = 1, splitrule = "extratrees", min.node.size = 1, max.depth = 1, num.threads = 50)
+# toc()
+# 
+# library(ranger)
+# set.seed(123)
+# rf_model <- ranger(data = rf_train, formula = first_gate ~ ., num.threads = 50, num.trees = 500, mtry = 1, splitrule = "extratrees", min.node.size = 1, max.depth = 1)
+# # rf_model <- ranger(x = rf_train %>% dplyr::select(-c(first_gate)), y = rf_train$first_gate, num.threads = 50, num.trees = 500, mtry = 1, splitrule = "extratrees", min.node.size = 1, max.depth = 1)
+# 
+# confusionMatrix(rf_train$first_gate, rf_model$predictions)
+# 
+# rf_pred <- predict(rf_model, rf_test %>% dplyr::select(-first_gate))
+# 
+# confusionMatrix(rf_test$first_gate, rf_pred$predictions)
+  
+library(xgboost)
+train_df <- train_df_step_1 %>% dplyr::select(c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A", "first_gate"))
+# train_df <- EmbedSOM_results_step_1$weights_df %>% mutate(first_gate = train_df_step_1$first_gate %>% factor(levels = c("live", "not_live"))) %>% dplyr::select(c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A", "first_gate"))
+
+test_df <- test_df_step_1 %>% dplyr::select(c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A", "first_gate"))
+# test_df <- test_EmbedSOM_results_step_1$weights_df %>% mutate(first_gate = test_df_step_1$first_gate %>% factor(levels = c("live", "not_live"))) %>% dplyr::select(c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A", "first_gate"))
+
+step_1_levels <- train_df$first_gate %>% unique()
+
+n_classes <- length(step_1_levels)
+
+classes_number <- data.frame(
+  classes = step_1_levels,
+  Number = 1:length(step_1_levels)
+)
+
+test_label <- test_df %>%
+  dplyr::select(first_gate) %>%
+  pull() %>%
+  str_replace(pattern = "not_live", replacement = "2") %>%
+  str_replace(pattern = "live", replacement = "1") %>%
+  as.numeric() %>%
+  "-"(1)
+
+train_label <- train_df %>%
+  dplyr::select(first_gate) %>%
+  pull() %>%
+  str_replace(pattern = "not_live", replacement = "2") %>%
+  str_replace(pattern = "live", replacement = "1") %>%
+  as.numeric() %>%
+  "-"(1)
+
+train_matrix <- xgb.DMatrix(
+  # data = EmbedSOM_results_step_1$weights_df[test_indices, ] %>%
+  # data = EmbedSOM_results_step_1$weights_df %>%  
+  data = train_df %>%    
+    # dplyr::select(-c(Time, cell_type, first_gate)) %>%
+    dplyr::select(-c(first_gate)) %>%
+    as.matrix(),
+  label = train_label
+  )
+
+test_matrix <- xgb.DMatrix(
+  # data = EmbedSOM_results_step_1$weights_df[-test_indices, ] %>%
+  # data = test_EmbedSOM_results_step_1$weights_df %>%  
+  data = test_df %>%    
+    # dplyr::select(-c(Time, cell_type, first_gate)) %>%
+    dplyr::select(-c(first_gate)) %>%
+    as.matrix(),
+  label = test_label
+  )
+
+k_fold <- 10
+
+n_round <- 300
+
+xgb_params <- list(
+  booster = "gbtree",
+  # booster = "dart",
+  objective = "multi:softprob",
+  eta = 0.3,
+  gamma = 6.22,
+  max_depth = 10,
+  min_child_weight = 9.11,
+  subsample = 0.991,
+  colsample_bytree = 0.955,
+  num_class = n_classes,
+  nthread = 50
+)
+
+tic()
+xgb_cv_model_1 <- xgb.cv(
+  params = xgb_params,
+  data = train_matrix,
+  nrounds = n_round,
+  nfold = k_fold,
+  showsd = T,
+  stratified = T,
+  print_every_n = 1,
+  early_stopping_rounds = 10,
+  maximize = F,
+  prediction = TRUE
+)
+toc()
+
+xgb_cv_model_1$best_iteration
+
+xgb_cv_model_1$evaluation_log %>% dplyr::filter(iter == xgb_cv_model_1$best_iteration) %>% dplyr::select(test_merror_mean) %>% pull
+
+xgb_cv_model_1$evaluation_log %>% 
+  ggplot(aes(x = iter)) +
+  geom_line(aes(y = train_merror_mean, colour = "train")) + 
+  geom_line(aes(y = test_merror_mean, colour = "test"))
+
+# first default - model training
+tic()
+xgb_1 <- xgb.train(
+  params = xgb_params, 
+  data = train_matrix, 
+  nrounds = xgb_cv_model_1$best_iteration, 
+  watchlist = list(val = test_matrix, train = train_matrix), 
+  print_every_n = 1, 
+  early_stopping_rounds = 10, 
+  maximize = F , 
+  eval_metric = "merror"
+  )
+toc()
+
+# xgb_1 %>% saveRDS(file = paste0(source_path, "home/trufenc/SOM_xgboost_model_not_normalized_step_1_2020_10_15.rds"))
+
+xgb_1 %>% saveRDS(file = paste0(source_path, "home/trufenc/xgboost_model_normalized_step_1_2020_10_15.rds"))
+
+xgb_pred <- predict(xgb_1, test_matrix)
+
+test_prediction_df <- matrix(
+  data = xgb_pred,
+  nrow = n_classes,
+  ncol = length(xgb_pred) / n_classes
+  ) %>%
+  t() %>%
+  data.frame()
+
+test_prediction <- test_prediction_df %>%
+  mutate(
+    label = test_label %>% as.numeric() + 1,
+    max_prob = max.col(., "last")
+  )
+
+library(caret)
+confusion_matrix <- confusionMatrix(factor(test_prediction$label), factor(test_prediction$max_prob))
+
+#view variable importance plot
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix), model = xgb_1)
+
+gp = xgb.ggplot.importance(importance_matrix = importance_matrix)
+print(gp)
+```
+
+
+
+```{r}
+path_to_control_files_1 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2018/CCP_cohorts_2018_12/2018_12_27_C067/2018_12_27_PA/C067_cA1556_gates")
+
+path_to_control_files_2 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90692")
+
+path_to_control_files_3 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90695")
+
+path_to_control_files_4 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_06/2019_06_10_C088/C088_PA_c89141_gates")
+
+path_to_control_files_5 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_06/2019_06_10_C088/C088_PA_c90043_gates")
+
+path_to_ko_files_1 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8038")
+
+path_to_ko_files_2 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8040")
+```
+
+```{r}
+path_to_files <- list(path_to_control_files_1,
+                      path_to_control_files_2,
+                      path_to_control_files_3)
+
+path_to_ko_files <- list(path_to_ko_files_1,
+                           path_to_ko_files_2)
+```
+
+```{r files}
+files <- path_to_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+ko_files <- path_to_ko_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+```
+
+```{r file_names}
+file_names <- path_to_files %>% purrr::map(list.files, pattern = ".fcs")
+ko_files_names <- path_to_ko_files %>% purrr::map(list.files, pattern = ".fcs")
+```
+
+```{r}
+panel_A_classes <- c(
+  "_clog\\+.fcs",
+  "_clog\\-_cells\\-.fcs",
+  "_S1\\-.fcs",
+  "_dead.fcs",
+  "_S2\\-.fcs",
+  "gdTCR_Eff_Klrg1\\-.fcs",
+  "gdTCR_Eff_Klrg1\\+.fcs",
+  "gdTCR_Res_Klrg1\\-.fcs",
+  "gdTCR_Res_Klrg1\\+.fcs",
+  "gdTCR_neg_Klrg1\\-.fcs",
+  "gdTCR_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  #"_CD5\\+\\-.fcs",
+  #"_CD4\\+ NKT\\+ or CD4\\- NKT\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Tregs_Eff_Klrg1\\-.fcs",
+  "Tregs_Eff_Klrg1\\+.fcs",
+  "Tregs_Res_Klrg1\\-.fcs",
+  "Tregs_Res_Klrg1\\+.fcs",
+  "Tregs_neg_Klrg1\\-.fcs",
+  "Tregs_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_1 <- purrr::map(seq_along(panel_A_classes), function(i) files[[1]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist()
+files_to_load_1 <- files[[1]][indices_1]
+files_to_load_names_1 <- file_names[[1]][indices_1]
+```
+
+# Second class assignment, more refined - gates_c90692
+```{r}
+panel_A_classes_2 <- c(
+  "clog\\-\\-.fcs",
+  "cells\\-.fcs",
+  "S1\\-.fcs",
+  "dead.fcs",
+  "S2\\-.fcs",
+  "gd_Eff_Klrg1\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+.fcs",
+  "gd_Res_Klrg1\\+\\-.fcs",
+  "gd_Res_Klrg1\\+.fcs",
+  "gd_neg_Klrg1\\+\\-.fcs",
+  "gd_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\+\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\+\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Treg_Eff_Klrg1\\+\\-.fcs",
+  "Treg_Eff_Klrg1\\+.fcs",
+  "Treg_Res_Klrg1\\+\\-.fcs",
+  "Treg_Res_Klrg1\\+.fcs",
+  "Treg_neg_Klrg1\\+\\-.fcs",
+  "Treg_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\+\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\+\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\+\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_2 <- purrr::map(seq_along(panel_A_classes_2), function(i) files[[2]] %>% str_which(pattern = panel_A_classes_2[i])) %>% unlist()
+files_to_load_2 <- files[[2]][indices_2]
+files_to_load_names_2 <- file_names[[2]][indices_2]
+
+files_to_load_2[files_to_load_2 %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+files_to_load_2 <- files_to_load_2[!is.na(files_to_load_2)]
+```
+
+# Second class assignment, more refined - gates_c90695
+```{r}
+panel_A_classes_3 <- c(
+  "clog\\-\\-.fcs",
+  "clog\\-_cells\\-.fcs",
+  "S1\\-.fcs",
+  "dead.fcs",
+  "S2\\-.fcs",
+  "gd_Eff_Klrg1\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+.fcs",
+  "gd_Res_Klrg1\\+\\-.fcs",
+  "gd_Res_Klrg1\\+.fcs",
+  "gd_neg_Klrg1\\+\\-.fcs",
+  "gd_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\+\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\+\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Treg_Eff_Klrg1\\+\\-.fcs",
+  "Treg_Eff_Klrg1\\+.fcs",
+  "Treg_Res_Klrg1\\+\\-.fcs",
+  "Treg_Res_Klrg1\\+.fcs",
+  "Treg_neg_Klrg1\\+\\-.fcs",
+  "Treg_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\+\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\+\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\+\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_3 <- purrr::map(seq_along(panel_A_classes_3), function(i) files[[3]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+files_to_load_3 <- files[[3]][indices_3]
+files_to_load_names_3 <- file_names[[3]][indices_3]
+```
+
+All the classes for panel A
+```{r}
+panel_A_classes_v <- c(
+  "clog+",
+  "cells-",
+  "S1-",
+  "dead",
+  "S2-",
+  "gdTCR_Eff_Klrg1-",
+  "gdTCR_Eff_Klrg1+",
+  "gdTCR_Res_Klrg1-",
+  "gdTCR_Res_Klrg1+",
+  "gdTCR_neg_Klrg1-",
+  "gdTCR_neg_Klrg1+",
+  "NK_Eff_Klrg1-",
+  "NK_Eff_Klrg1+",
+  "NK_Res_Klrg1-",
+  "NK_Res_Klrg1+",
+  "NK_neg_Klrg1+-",
+  "NK_neg_Klrg1+",
+  "CD4-NKT_Eff_Klrg1-",
+  "CD4-NKT_Eff_Klrg1+",
+  "CD4-NKT_Res_Klrg1-",
+  "CD4-NKT_Res_Klrg1+",
+  "CD4-NKT_neg_Klrg1-",
+  "CD4-NKT_neg_Klrg1+",
+  "CD4+NKT_Eff_Klrg1-",
+  "CD4+NKT_Eff_Klrg1+",
+  "CD4+NKT_Res_Klrg1-",
+  "CD4+NKT_Res_Klrg1+",
+  "CD4+NKT_neg_Klrg1-",
+  "CD4+NKT_neg_Klrg1+",
+  "DN",
+  "Tregs_Eff_Klrg1-",
+  "Tregs_Eff_Klrg1+",
+  "Tregs_Res_Klrg1-",
+  "Tregs_Res_Klrg1+",
+  "Tregs_neg_Klrg1-",
+  "Tregs_neg_Klrg1+",
+  "Th_Eff_Klrg1-",
+  "Th_Eff_Klrg1+",
+  "Th_Res_Klrg1-",
+  "Th_Res_Klrg1+",
+  "Th_neg_Klrg1-",
+  "Th_neg_Klrg1+",
+  "CD8_Naive_Klrg1-_VM Tcells-",
+  "CD8_Naive_Klrg1-_VM Tcells",
+  "CD8_Naive_Klrg1+_VM Tcells-",
+  "CD8_Naive_Klrg1+_VM Tcells",
+  "CD8_Eff_Klrg1-_VM Tcells-",
+  "CD8_Eff_Klrg1-_VM Tcells",
+  "CD8_Eff_Klrg1+_VM Tcells-",
+  "CD8_Eff_Klrg1+_VM Tcells",
+  "CD8_Res_Klrg1-_VM Tcells-",
+  "CD8_Res_Klrg1-_VM Tcells",
+  "CD8_Res_Klrg1+_VM Tcells-",
+  "CD8_Res_Klrg1+_VM Tcells",
+  "CD8_neg_Klrg1-_VM Tcells-",
+  "CD8_neg_Klrg1-_VM Tcells",
+  "CD8_neg_Klrg1+_VM Tcells-",
+  "CD8_neg_Klrg1+_VM Tcells"
+)
+```
+
+```{r}
+ko_indices_1 <- purrr::map(seq_along(panel_A_classes_3), function(i) ko_files[[1]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+ko_files_to_load_1 <- ko_files[[1]][ko_indices_1]
+ko_files_to_load_names_1 <- ko_files_names[[1]][ko_indices_1]
+```
+
+```{r}
+ko_indices_2 <- purrr::map(seq_along(panel_A_classes_3), function(i) ko_files[[2]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+ko_files_to_load_2 <- ko_files[[2]][ko_indices_2]
+ko_files_to_load_names_2 <- ko_files_names[[2]][ko_indices_2]
+```
+
+# Load files...
+```{r}
+files_to_load <- c(files_to_load_1, files_to_load_2, ko_files_to_load_1, ko_files_to_load_2)
+files_to_load[files_to_load %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+files_to_load <- files_to_load[!is.na(files_to_load)]
+
+test_files <- c(files_to_load_3)
+
+diff_som_1 <- files_to_load %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+test_diff_som <- test_files %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+```
+
+
+# ...and pre-procees them ()
+```{r pre_process_data}
+pre_process_data <- function(diff_som, to_transform = c(1:18)){
+  # diff_som$fs$data <- diff_som$fs$data %>% purrr::set_names(str_remove(string = names(diff_som$fs$data), pattern = "FJComp."))
+  diff_som_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+  normally_dstributed <- diff_som_df %>% purrr::map(bestNormalize::orderNorm)
+  normally_dstributed_df <- purrr::map(seq_along(normally_dstributed), function(i) normally_dstributed[[i]]$x.t) %>% purrr::set_names(colnames(diff_som_df)) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols()
+  diff_som$fs$data[, to_transform] <- normally_dstributed_df %>% as.matrix()
+  return(diff_som)
+}
+```
+
+```{r}
+# diff_som_1 <- diff_som_1 %>% pre_process_data()
+# test_diff_som <- test_diff_som %>% pre_process_data()
+```
+
+
+# fcs data df
+```{r build_fcs_data_df}
+# cell_types <- files_to_load_names %>% str_remove(pattern = ".fcs") %>% str_remove(pattern = "export_Specimen_..._c....._..._..._")
+cell_types_control <- c(files_to_load_names_1, files_to_load_names_2) %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._c....._..._..._")
+
+cell_types_ko <- c(ko_files_to_load_names_1, ko_files_to_load_names_2) %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._tg....._..._..._")
+
+cell_types <- c(cell_types_control, cell_types_ko)
+cell_types[cell_types %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+cell_types <- cell_types[!is.na(cell_types)]
+
+build_fcs_data_df <- function(cell_types, diff_som) {
+  
+  cell_types_df <- cell_types %>%
+    as.data.frame() %>%
+    rownames_to_column() %>%
+    dplyr::rename("cell_types" = ".", "File" = "rowname") %>%
+    mutate(File = File %>% as.numeric())
+
+  cell_types_df <- cell_types_df %>%
+    mutate(cell_types = cell_types %>% recode(
+      "clog--" = "clog+",
+      "clog-_cells-" = "cells-",
+      "cells_S1-" = "S1-",
+      "S2_dead" = "dead",
+      "S1_S2-" = "S2-",
+      "NK_Eff_Klrg1+-" = "NK_Eff_Klrg1-",
+      "NK_Res_Klrg1+-" = "NK_Res_Klrg1-",
+      "NK_neg_Klrg1+-" = "NK_neg_Klrg1-",
+      "gd_Eff_Klrg1+" = "gdTCR_Eff_Klrg1+",
+      "gd_Eff_Klrg1+-" = "gdTCR_Eff_Klrg1-",
+      "gd_Res_Klrg1+" = "gdTCR_Res_Klrg1+",
+      "gd_Res_Klrg1+-" = "gdTCR_Res_Klrg1-",
+      "gd_neg_Klrg1+" = "gdTCR_neg_Klrg1+",
+      "gd_neg_Klrg1+-" = "gdTCR_neg_Klrg1-",
+      "CD4-NKT_Eff_Klrg1+-" = "CD4-NKT_Eff_Klrg1-",
+      "CD4-NKT_Res_Klrg1+-" = "CD4-NKT_Res_Klrg1-",
+      "CD4-NKT_neg_Klrg1+-" = "CD4-NKT_neg_Klrg1-",
+      "CD4+NKT_Eff_Klrg1+-" = "CD4+NKT_Eff_Klrg1-",
+      "CD4+NKT_Res_Klrg1+-" = "CD4+NKT_Res_Klrg1-",
+      "CD4+NKT_neg_Klrg1+-" = "CD4+NKT_neg_Klrg1-",
+      "Th_Eff_Klrg1+-" = "Th_Eff_Klrg1-",
+      "Th_Res_Klrg1+-" = "Th_Res_Klrg1-",
+      "Th_neg_Klrg1+-" = "Th_neg_Klrg1-",
+      "Treg_Eff_Klrg1+-" = "Tregs_Eff_Klrg1-",
+      "Treg_Res_Klrg1+-" = "Tregs_Res_Klrg1-",
+      "Treg_neg_Klrg1+-" = "Tregs_neg_Klrg1-",
+      "Treg_Eff_Klrg1+" = "Tregs_Eff_Klrg1+",
+      "Treg_Res_Klrg1+" = "Tregs_Res_Klrg1+",
+      "Treg_neg_Klrg1+" = "Tregs_neg_Klrg1+",
+      "CD8_Naive_Klrg1-_VM Tcells" = "CD8_Naive_Klrg1-_VM Tcells+",
+      "CD8_Naive_Klrg1+_VM Tcells" = "CD8_Naive_Klrg1+_VM Tcells+",
+      "CD8_Eff_Klrg1-_VM Tcells" = "CD8_Eff_Klrg1-_VM Tcells+",
+      "CD8_Eff_Klrg1+_VM Tcells" = "CD8_Eff_Klrg1+_VM Tcells+",
+      "CD8_Res_Klrg1-_VM Tcells" = "CD8_Res_Klrg1-_VM Tcells+",
+      "CD8_Res_Klrg1+_VM Tcells" = "CD8_Res_Klrg1+_VM Tcells+",
+      "CD8_neg_Klrg1-_VM Tcells" = "CD8_neg_Klrg1-_VM Tcells+",
+      "CD8_neg_Klrg1+_VM Tcells" = "CD8_neg_Klrg1+_VM Tcells+",
+      "CD8+_Eff_Klrg1-_VM Tcells-" = "CD8_Eff_Klrg1-_VM Tcells-",
+      "CD8+_Eff_Klrg1+_VM Tcells" = "CD8_Eff_Klrg1+_VM Tcells+",
+      "CD8+_Eff_Klrg1+_VM Tcells-" = "CD8_Eff_Klrg1+_VM Tcells-",
+      "CD8+_Naive_Klrg1-_VM Tcells" = "CD8_Naive_Klrg1-_VM Tcells+",
+      "CD8+_Naive_Klrg1-_VM Tcells-" = "CD8_Naive_Klrg1-_VM Tcells-",
+      "CD8+_Naive_Klrg1+_VM Tcells" = "CD8_Naive_Klrg1+_VM Tcells+",
+      "CD8+_Naive_Klrg1+_VM Tcells-" = "CD8_Naive_Klrg1+_VM Tcells-",
+      "CD8+_neg_Klrg1-_VM Tcells" = "CD8_neg_Klrg1-_VM Tcells+",
+      "CD8+_neg_Klrg1-_VM Tcells-" = "CD8_neg_Klrg1-_VM Tcells-",
+      "CD8+_neg_Klrg1+_VM Tcells" = "CD8_neg_Klrg1+_VM Tcells+",
+      "CD8+_neg_Klrg1+_VM Tcells-" = "CD8_neg_Klrg1+_VM Tcells-",
+      "CD8+_Res_Klrg1-_VM Tcells" = "CD8_Res_Klrg1-_VM Tcells+",
+      "CD8+_Res_Klrg1-_VM Tcells-" = "CD8_Res_Klrg1-_VM Tcells-",
+      "CD8+_Res_Klrg1+_VM Tcells" = "CD8_Res_Klrg1+_VM Tcells+",
+      "CD8+_Res_Klrg1+_VM Tcells-" = "CD8_Res_Klrg1+_VM Tcells-"
+    ))
+
+  manual_gating <- diff_som$fs$data %>%
+    as.data.frame() %>%
+    full_join(cell_types_df) %>%
+    na.omit() %>%
+    dplyr::select(cell_types) %>%
+    unlist() %>%
+    as.character() %>%
+    factor()
+
+  facs_data_df <- diff_som$fs$data %>%
+    as.data.frame() %>%
+    dplyr::select(c(1:19))
+  # facs_data_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(to_transform)
+
+  facs_data_df <- facs_data_df %>%
+    purrr::set_names(str_remove(string = names(facs_data_df), pattern = "FJComp."))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(cell_type = manual_gating)
+  
+  return(facs_data_df)
+}
+
+facs_data_df <- diff_som_1 %>% build_fcs_data_df(cell_types = cell_types)
+
+facs_data_df <- facs_data_df %>% 
+  mutate(first_gate = case_when(!(cell_type %in% c("clog+", "cells-", "S1-", "S2-", "dead")) ~ "live"))
+  
+facs_data_df <- facs_data_df %>% 
+  mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+```
+
+# cell types test data
+```{r}
+cell_types_test <- c(files_to_load_names_3) %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._c....._..._..._")
+
+facs_test_data_df <- test_diff_som %>% build_fcs_data_df(cell_types = cell_types_test)
+
+facs_test_data_df <- facs_test_data_df %>% 
+  mutate(first_gate = case_when(!(cell_type %in% c("clog+", "cells-", "S1-", "S2-", "dead")) ~ "live"))
+  
+facs_test_data_df <- facs_test_data_df %>% 
+  mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+```
+
+```{r}
+first_gate_table <- table(facs_data_df$first_gate)
+
+# sort data
+reseed()
+facs_data_df <- facs_data_df %>% dplyr::slice(sample(nrow(facs_data_df)))
+
+# balance data
+reseed()
+facs_data_subset_df <- facs_data_df %>% split(f = .$first_gate) %>% purrr::map(dplyr::slice, sample(150000)) %>% bind_rows()
+```
+
+```{r}
+# facs_data_subset_df %>% vroom::vroom_write(paste0(source_path, "home/trufenc/balanced_data_2_classes_first_gate.tsv"), delim = "\t")
+```
+
+```{r}
+# facs_test_data_df %>% vroom::vroom_write(paste0(source_path, "home/trufenc/balanced_test_data_2_classes_first_gate.tsv"), delim = "\t")
+```
+
+```{r}
+facs_data_subset_df <- vroom::vroom(paste0(source_path, "home/trufenc/balanced_data_2_classes_first_gate.tsv"), delim = "\t")
+
+normally_distributed_list <- facs_data_subset_df %>% dplyr::select(-c(Time, cell_type, first_gate)) %>% purrr::map(bestNormalize::orderNorm)
+
+train_df <- purrr::map(seq_along(normally_distributed_list), function(i) normally_distributed_list[[i]]$x.t) %>% purrr::set_names(colnames(facs_data_subset_df)[1:18]) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% mutate(first_gate = facs_data_subset_df$first_gate)
+```
+
+```{r}
+facs_test_data_df <- vroom::vroom(paste0(source_path, "home/trufenc/balanced_test_data_2_classes_first_gate.tsv"), delim = "\t")
+
+normally_distributed_test_list <- facs_test_data_df %>% dplyr::select(-c(Time, cell_type, first_gate)) %>% purrr::map(bestNormalize::orderNorm)
+
+test_df <- purrr::map(seq_along(normally_distributed_test_list), function(i) normally_distributed_test_list[[i]]$x.t) %>% purrr::set_names(colnames(facs_test_data_df)[1:18]) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% mutate(first_gate = facs_test_data_df$first_gate)
+```
+
+
+
+```{r}
+# facs_data_subset_df <- vroom::vroom(paste0(source_path, "home/trufenc/balanced_data_2_classes_first_gate.tsv"), delim = "\t")
+# facs_test_data_df <- vroom::vroom(paste0(source_path, "home/trufenc/balanced_test_data_2_classes_first_gate.tsv"), delim = "\t")
+```
+
+
+# Split data for Cross-validation
+```{r}
+# sort data
+reseed()
+facs_data_subset_df <- facs_data_subset_df %>% dplyr::slice(sample(nrow(facs_data_subset_df)))
+
+k_fold <- 5
+
+# Create 5 equally size folds
+reseed()
+folds <- cut(x = seq(1, nrow(facs_data_subset_df)), breaks = k_fold, labels = FALSE)
+# Perform 10 fold cross validation
+# Segement your data by fold using the which() function
+test_indices <- purrr::map(seq_len(k_fold), function(i) which(folds == i, arr.ind = TRUE))
+
+# Use the test and train data partitions however you desire...
+test_data <- purrr::map(seq_len(k_fold), function(i) facs_data_subset_df[test_indices[[i]], ]) %>% purrr::set_names(paste0("test_", 1:k_fold))
+train_data <- purrr::map(seq_len(k_fold), function(i) facs_data_subset_df[-test_indices[[i]], ]) %>% purrr::set_names(paste0("train_", 1:k_fold))
+  
+train_data_list <- purrr::map(seq_len(k_fold), function(i) list(measurements = train_data[[i]] %>% dplyr::select(-cell_type) %>% as.matrix(), classes_col = train_data[[i]] %>% dplyr::select(cell_type) %>% unlist()))
+  
+test_data_list <- purrr::map(seq_len(k_fold), function(i) list(measurements = test_data[[i]] %>% dplyr::select(-c(cell_type, first_gate)) %>% as.matrix(), classes_col = test_data[[i]] %>% dplyr::select(first_gate) %>% unlist()))
+```
+
+
+
+```{r}
+diff_som_1 %>% saveRDS("~/Documents/diff_som_1.rds")
+facs_data_subset_df %>% vroom::vroom_write("~/Documents/facs_data_subset_df_step_1.tsv", delim = "\t")
+```
+
+```{r}
+test_diff_som %>% saveRDS(paste0(source_path, "/home/trufenc/test_diff_som_1.rds"))
+```
+
+
+```{r}
+diff_som_1 <- readRDS(paste0(source_path, "/home/trufenc/diff_som_1.rds"))
+diff_som_1$fs$data <- train_df %>% dplyr::select(-first_gate) %>% as.matrix()
+# facs_data_subset_df <- vroom::vroom(paste0(source_path, "/home/trufenc/facs_data_subset_df_step_1.tsv"), delim = "\t")
+```
+
+```{r}
+test_diff_som_1 <- readRDS(paste0(source_path, "/home/trufenc/test_diff_som_1.rds"))
+test_diff_som_1$fs$data <- test_df %>% dplyr::select(-first_gate) %>% as.matrix() 
+```
+
+
+
+```{r}
+k_fold <- 5
+
+# Create 5 equally size folds
+reseed()
+folds <- cut(x = seq(1, nrow(diff_som_1$fs$data)), breaks = k_fold, labels = FALSE)
+# Perform 10 fold cross validation
+# Segement your data by fold using the which() function
+test_indices <- purrr::map(seq_len(k_fold), function(i) which(folds == i, arr.ind = TRUE))
+
+# Use the test and train data partitions however you desire...
+test_data <- purrr::map(seq_len(k_fold), function(i) diff_som_1$fs$data[test_indices[[i]], ])
+train_data <- purrr::map(seq_len(k_fold), function(i) diff_som_1$fs$data[-test_indices[[i]], ])
+
+diff_som_1_test <- list(test_1 = diff_som_1,
+                        test_2 = diff_som_1,
+                        test_3 = diff_som_1,
+                        test_4 = diff_som_1,
+                        test_5 = diff_som_1)
+
+diff_som_1_test[[1]]$fs$data <- diff_som_1_test[[1]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[1]]) %>% dplyr::select(-c("Time")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+diff_som_1_test[[2]]$fs$data <- diff_som_1_test[[2]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[2]]) %>% dplyr::select(-c("Time")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+diff_som_1_test[[3]]$fs$data <- diff_som_1_test[[3]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[3]]) %>% dplyr::select(-c("Time")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+diff_som_1_test[[4]]$fs$data <- diff_som_1_test[[4]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[4]]) %>% dplyr::select(-c("Time")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+diff_som_1_test[[5]]$fs$data <- diff_som_1_test[[5]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[5]]) %>% dplyr::select(-c("Time")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+
+# diff_som_1_test[[1]]$fs$data <- diff_som_1_test[[1]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[1]]) %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+# diff_som_1_test[[2]]$fs$data <- diff_som_1_test[[2]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[2]]) %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+# diff_som_1_test[[3]]$fs$data <- diff_som_1_test[[3]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[3]]) %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+# diff_som_1_test[[4]]$fs$data <- diff_som_1_test[[4]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[4]]) %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+# diff_som_1_test[[5]]$fs$data <- diff_som_1_test[[5]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[5]]) %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+
+
+# purrr::map(seq_len(k_fold), function(i) diff_som_1_test[[i]]$fs$data = diff_som_1_test[[i]]$fs$data %>% as.data.frame() %>% dplyr::slice(test_indices[[i]]) %>% as.matrix() )
+
+
+diff_som_1_train <- list(train_1 = diff_som_1,
+                        train_2 = diff_som_1,
+                        train_3 = diff_som_1,
+                        train_4 = diff_som_1,
+                        train_5 = diff_som_1)
+
+diff_som_1_train[[1]]$fs$data <- diff_som_1_train[[1]]$fs$data %>% as.data.frame() %>% dplyr::slice(-test_indices[[1]]) %>% dplyr::select(-c("Time")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+diff_som_1_train[[2]]$fs$data <- diff_som_1_train[[2]]$fs$data %>% as.data.frame() %>% dplyr::slice(-test_indices[[2]]) %>% dplyr::select(-c("Time")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+diff_som_1_train[[3]]$fs$data <- diff_som_1_train[[3]]$fs$data %>% as.data.frame() %>% dplyr::slice(-test_indices[[3]]) %>% dplyr::select(-c("Time")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+diff_som_1_train[[4]]$fs$data <- diff_som_1_train[[4]]$fs$data %>% as.data.frame() %>% dplyr::slice(-test_indices[[4]]) %>% dplyr::select(-c("Time")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+diff_som_1_train[[5]]$fs$data <- diff_som_1_train[[5]]$fs$data %>% as.data.frame() %>% dplyr::slice(-test_indices[[5]]) %>% dplyr::select(-c("Time")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+
+# diff_som_1_train[[1]]$fs$data <- diff_som_1_train[[1]]$fs$data %>% as.data.frame() %>% dplyr::slice(-test_indices[[1]]) %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+# diff_som_1_train[[2]]$fs$data <- diff_som_1_train[[2]]$fs$data %>% as.data.frame() %>% dplyr::slice(-test_indices[[2]]) %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+# diff_som_1_train[[3]]$fs$data <- diff_som_1_train[[3]]$fs$data %>% as.data.frame() %>% dplyr::slice(-test_indices[[3]]) %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+# diff_som_1_train[[4]]$fs$data <- diff_som_1_train[[4]]$fs$data %>% as.data.frame() %>% dplyr::slice(-test_indices[[4]]) %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+# diff_som_1_train[[5]]$fs$data <- diff_som_1_train[[5]]$fs$data %>% as.data.frame() %>% dplyr::slice(-test_indices[[5]]) %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+
+# purrr::map(seq_len(k_fold), function(i) diff_som_1_train[[i]]$fs$data = diff_som_1_train[[i]]$fs$data[-test_indices[[i]], ])
+
+# train_data_list <- purrr::map(seq_len(k_fold), function(i) list(measurements = train_data[[i]] %>% dplyr::select(-cell_type) %>% as.matrix(), classes_col = train_data[[i]] %>% dplyr::select(cell_type) %>% unlist()))
+
+# test_data_list <- purrr::map(seq_len(k_fold), function(i) list(measurements = test_data[[i]] %>% dplyr::select(-cell_type) %>% as.matrix(), classes_col = test_data[[i]] %>% dplyr::select(cell_type) %>% unlist()))
+```
+
+```{r}
+# process_C5 <- function(input = facs_data_df, n_clusters, ...){
+process_C5 <- function(df, features, ...){  
+  library(tidyverse, warn.conflicts = FALSE)
+  library(caret, warn.conflicts = FALSE)
+  library(C50, warn.conflicts = FALSE)
+  # library(doParallel, warn.conflicts = FALSE)
+  # EmbedSOM_results_df_all = process_step_1_output$EmbedSOM_results_df_all
+  # EmbedSOM_results_df = process_step_1_output$EmbedSOM_results_df
+  # facs_data_df = process_step_1_output$facs_data_df
+  # 
+  # features_all_from_SOM <- EmbedSOM_results_df_all %>% dplyr::select(dplyr::contains(".y"))
+  # features_selected_from_SOM <- df %>% dplyr::select(dplyr::contains(".y"))
+  # 
+  
+  df <- df %>% as.data.frame()
+  
+  features_df <- df %>% 
+    dplyr::select(-c(first_gate, cell_type)) %>% 
+    dplyr::select(features) %>% 
+    apply(FUN = as.numeric, MARGIN = c(2)) %>% 
+    as.data.frame()
+  
+  # features_selected_no_SOM <- df %>% dplyr::select(-c(first_gate, cell_type)) %>% dplyr::select(c(FSC.A, SSC.A, FSC.H, SSC.W, Indo.1..Violet..A))
+  
+  classes <- df$first_gate %>% factor()
+  
+  # rules_model_selected
+  # rules_model <- C5.0(x = features_df, y = classes, trials = 20, rules = TRUE)
+  # tree_model <- C5.0(x = features_df, y = classes, trials = 20, rules = FALSE)
+  
+  # rules_model_all
+  rules_model <- C5.0(x = features_df, y = classes, trials = 20, rules = TRUE)
+  # tree_model <- C5.0(x = features_df, y = classes, trials = 20, rules = FALSE)
+  
+  # rules_model_from_SOM
+  # rules_model <- C5.0(x = features_selected_from_SOM, y = classes, trials = 1, rules = TRUE)
+  # tree_model <- C5.0(x = features_selected_from_SOM, y = classes, trials = 1, rules = FALSE)
+  
+  # tree_model_from_SOM_all_features
+  # tree_model <- C5.0(x = features_all_from_SOM, y = classes, trials = 1, rules = FALSE)
+  # rules_model <- C5.0(x = features_all_from_SOM, y = classes, trials = 1, rules = TRUE)
+
+    return(rules_model)
+}
+
+
+df_1 <- train_data[[1]] %>% 
+  as.data.frame() %>% 
+  dplyr::select(-c(first_gate, cell_type)) %>% 
+  dplyr::select(c(1:18)) %>% 
+  apply(FUN = as.numeric, MARGIN = c(2)) %>% 
+  as.data.frame()
+```
+
+# No SOM - use data directly
+```{r}
+registerDoParallel(cores = 5)
+
+# 1945.741 sec elapsed
+tic()
+rules_models <- foreach(i = seq_along(train_data)) %dopar% process_C5(df = train_data[[i]], features = c(1:18))
+toc()
+
+# tic()
+# rules_models <- train_data %>% purrr::map(function(x) x %>% process_C5(features = c(1:18)))
+# toc()
+
+# 66784.289 sec elapsed
+# tic()
+# rules_models <- train_data %>% purrr::map(function(x) x %>% process_C5())
+# toc()
+# rules_models %>% saveRDS(file = "~/Downloads/rules_models_2020_06_09.rds")
+```
+
+# save
+
+```{r}
+summary(rules_models[[3]])
+
+rules_models_results <- rules_models %>% purrr::map(summary) %>%  purrr::map(capture.output)
+
+purrr::map(seq_along(rules_models_results), function(i) rules_models_results[[i]] %>% cat(file = paste0("~/Downloads/rules_models_results_", i, ".txt")))
+```
+
+
+Validate
+```{r}
+# 48.722 sec elapsed
+tic()
+predictions_validation <- purrr::map(seq_along(rules_models_results), function(i) predict(rules_models[[i]], newdata = test_data_list[[i]]$measurements))
+toc()
+```
+
+# Confusion matrix
+```{r}
+confusion_matrix_results <- purrr::map(seq_along(predictions_validation), function(i) caret::confusionMatrix(predictions_validation[[i]], test_data_list[[i]]$classes_col %>% factor()))
+
+mean_accuracy <- confusion_matrix_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% mean()
+
+sd_accuracy <- confusion_matrix_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% sd()
+
+mean_kappa <- confusion_matrix_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Kappa"]) %>% unlist() %>% mean()
+```
+
+# Test if cross-validation really works with new data
+```{r}
+test_df <- facs_test_data_df %>% dplyr::select(-c(cell_type, first_gate))
+
+test_results <- purrr::map(seq_along(rules_models_results), function(i) predict(rules_models[[i]], newdata = test_df))
+
+confusion_matrix_test_results <- purrr::map(seq_along(test_results), function(i) caret::confusionMatrix(test_results[[i]], facs_test_data_df$first_gate %>% factor()))
+
+confusion_matrix_test_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% mean()
+confusion_matrix_test_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Kappa"]) %>% unlist() %>% mean()
+```
+
+
+
+
+
+# No SOM - Selected features
+```{r}
+registerDoParallel(cores = 5)
+
+# 184.415 sec elapsed
+tic()
+rules_models_selected_features <- foreach(i = seq_along(train_data)) %dopar% process_C5(df = train_data[[i]], features = c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A"))
+toc()
+
+# 67283.483 sec elapsed
+# tic()
+# rules_models_selected_features <- train_data %>% purrr::map(dplyr::select, c(FSC.A, SSC.A, FSC.H, SSC.W, Indo.1..Violet..A)) %>% purrr::map(function(x) x %>% process_C5(n_clusters = 6))
+# toc()
+
+# rules_models_selected_features %>% saveRDS(file = "~/Downloads/rules_models_selected_features_results_2020_06_10.rds")
+```
+
+```{r}
+rules_models_selected_features_results <- rules_models_selected_features %>% purrr::map(summary) %>%  purrr::map(capture.output)
+
+purrr::map(seq_along(rules_models_selected_features_results), function(i) rules_models_selected_features_results[[i]] %>% cat(file = paste0("~/Downloads/rules_models_selected_features_results_", i, ".txt")))
+```
+
+# Validate
+```{r}
+# 12.661 sec elapsed
+tic()
+selected_features_predictions_validation <- purrr::map(seq_along(rules_models_selected_features_results), function(i) predict(rules_models_selected_features[[i]], newdata = test_data_list[[i]]$measurements))
+toc()
+```
+
+# Confusion matrix
+```{r}
+confusion_matrix_selected_features_results <- purrr::map(seq_along(selected_features_predictions_validation), function(i) caret::confusionMatrix(selected_features_predictions_validation[[i]], test_data_list[[i]]$classes_col %>% factor()))
+
+mean_selected_features_accuracy <- confusion_matrix_selected_features_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% mean()
+
+sd_selected_features_accuracy <- confusion_matrix_selected_features_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% sd()
+
+confusion_matrix_selected_features_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Kappa"]) %>% unlist() %>% mean()
+```
+
+# Test if cross-validation really works with new data
+```{r}
+test_df <- facs_test_data_df %>% dplyr::select(-c(cell_type, first_gate))
+
+test_selected_features_results <- purrr::map(seq_along(rules_models_results), function(i) predict(rules_models_selected_features[[i]], newdata = test_df))
+
+confusion_matrix_test_selected_features_results <- purrr::map(seq_along(test_selected_features_results), function(i) caret::confusionMatrix(test_selected_features_results[[i]], facs_test_data_df$first_gate %>% factor()))
+
+confusion_matrix_test_selected_features_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% mean()
+
+confusion_matrix_test_selected_features_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Kappa"]) %>% unlist() %>% mean()
+```
+
+
+
+
+
+
+```{r}
+# diff_som <- diff_som_1_train[[1]]
+
+perform_SOM <- function(diff_som, facs_data_df, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE) {
+
+  library(tidyverse)
+  library(DiffSOM)
+  
+  diff_som = diff_som
+  
+  # calculate optimal grid
+  vesanto_dim <- diff_som$fs$data %>%
+    nrow() %>%
+    sqrt() %>%
+    "*"(5)
+  
+  grid_dim <- vesanto_dim %>%
+    sqrt() %>%
+    ceiling() %>%
+    "+"(20)
+
+  # SOM
+  reseed()
+  ds_step_1 <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = columns_to_use, importance = importance, nclust = grid_dim * grid_dim, rlen = 5)
+
+  # Optional to normalize weights
+  if (normalize_weights) {
+    ds_step_1$map$codes <- purrr::map(seq_len(ncol(ds_step_1$map$codes)), function(i) {ds_step_1$map$codes[, i] %>% bestNormalize::orderNorm() %>% .[["x.t"]] %>% scale_to_range_0_1()}) %>% purrr::set_names(colnames(ds_step_1$map$codes)) %>% bind_cols()
+  }
+
+  grid_clustering_df <- ds_step_1$map$grid %>%
+    as.data.frame() %>%
+    rownames_to_column() %>%
+    mutate(cluster = ds_step_1$clust) %>%
+    mutate(rowname = rowname %>% as.numeric()) %>%
+    bind_cols(as.data.frame(ds_step_1$map$codes))
+
+  EmbedSOM_results_df <- ds_step_1$fs$data %>%
+    as.data.frame() %>%
+    mutate(mapping = ds_step_1$map$mapping[, 1]) %>%
+    left_join(grid_clustering_df, by = c("mapping" = "rowname")) %>%
+    mutate(first_gate = facs_data_df$first_gate)
+
+  output <- list(EmbedSOM_results_df = EmbedSOM_results_df,
+                 diff_som = ds_step_1)
+  
+  return(output)
+}
+
+```
+
+
+# SOM - Selected features
+```{r}
+registerDoParallel(cores = 50)
+# 175.813 sec elapsed - serial
+tic()
+# EmbedSOM_results_train <- purrr::map(seq_along(diff_som_1_train), function(i) perform_SOM(diff_som = diff_som_1_train[[i]], facs_data_subset_df[-test_indices[[i]], ], columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE))
+EmbedSOM_results_train <- purrr::map(seq_along(diff_som_1_train), function(i) perform_SOM(diff_som = diff_som_1_train[[i]], facs_data_subset_df[-test_indices[[i]], ], columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = FALSE))
+toc()
+
+# 40.863 sec elapsed
+tic()
+# EmbedSOM_results_test <- purrr::map(seq_along(diff_som_1_test), function(i) perform_SOM(diff_som = diff_som_1_test[[i]], facs_data_subset_df[test_indices[[i]], ], columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE))
+EmbedSOM_results_test <- purrr::map(seq_along(diff_som_1_test), function(i) perform_SOM(diff_som = diff_som_1_test[[i]], facs_data_subset_df[test_indices[[i]], ], columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = FALSE))
+toc()
+```
+
+# C5.0 on SOM
+```{r}
+process_C5_from_SOM <- function(df, features, ...){  
+  library(tidyverse, warn.conflicts = FALSE)
+  library(caret, warn.conflicts = FALSE)
+  library(C50, warn.conflicts = FALSE)
+  # EmbedSOM_results_df_all = process_step_1_output$EmbedSOM_results_df_all
+  # EmbedSOM_results_df = process_step_1_output$EmbedSOM_results_df
+  # facs_data_df = process_step_1_output$facs_data_df
+  # 
+  # features_all_from_SOM <- EmbedSOM_results_df_all %>% dplyr::select(dplyr::contains(".y"))
+  weights_df <- df %>% dplyr::select(features)
+  # 
+  # features_all_no_SOM <- facs_data_df %>% dplyr::select(-c(first_gate, cell_type))
+  # features_selected_no_SOM <- facs_data_df %>% dplyr::select(-c(first_gate, cell_type)) %>% dplyr::select(c(FSC.A, SSC.A, FSC.H, SSC.W, Indo.1..Violet..A))
+  
+  classes <- df$first_gate %>% factor()
+
+  # rules_model_selected
+  # rules_model <- C5.0(x = features_df, y = classes, trials = 20, rules = TRUE)
+  # tree_model <- C5.0(x = features_df, y = classes, trials = 20, rules = FALSE)
+  
+  # rules_model_all
+  # rules_model <- C5.0(x = features_df, y = classes, trials = 20, rules = TRUE)
+  # tree_model <- C5.0(x = features_df, y = classes, trials = 20, rules = FALSE)
+  
+  # rules_model_from_SOM
+  rules_model <- C5.0(x = weights_df, y = classes, trials = 1, rules = TRUE)
+  # tree_model <- C5.0(x = weights_df, y = classes, trials = 1, rules = FALSE)
+  
+  # tree_model_from_SOM_all_features
+  # tree_model <- C5.0(x = weights_df, y = classes, trials = 1, rules = FALSE)
+  # rules_model <- C5.0(x = weights_df, y = classes, trials = 1, rules = TRUE)
+  return(rules_model)
+}
+```
+
+```{r}
+# 78.039 sec elapsed - serial
+tic()
+# rules_models_SOM_selected_features <- EmbedSOM_results_train %>% purrr::map(function(x) x %>% .[["EmbedSOM_results_df"]] %>% process_C5(dplyr::contains(".y")))
+# rules_models_SOM_selected_features <- EmbedSOM_results_train %>% purrr::map(function(x) x %>% .[["diff_som"]] %>% .[["map"]] %>% .[["codes"]] %>% process_C5(n_clusters = 6))
+# rules_models_SOM_selected_features <- purrr::map(seq_along(EmbedSOM_results_train), function(i) EmbedSOM_results_train[[i]]$EmbedSOM_results_df %>% process_C5(n_clusters = 6))
+
+rules_models_SOM_selected_features <- foreach(i = seq_along(EmbedSOM_results_train)) %dopar% process_C5_from_SOM(df = EmbedSOM_results_train[[i]]$EmbedSOM_results_df, features = dplyr::contains(".y"))
+toc()
+
+# EmbedSOM_results_train[[1]]$diff_som$map$codes
+# EmbedSOM_results_train[[1]]$EmbedSOM_results_df
+
+# rules_models_SOM_selected_features %>% saveRDS(file = "~/Downloads/rules_models_SOM_selected_features.rds")
+```
+
+
+# Validate
+```{r}
+# 2.862 sec elapsed
+tic()
+selected_features_SOM_predictions_validation <- purrr::map(seq_along(rules_models_SOM_selected_features), function(i) predict(rules_models_SOM_selected_features[[i]], newdata = EmbedSOM_results_test[[i]]$EmbedSOM_results_df %>% dplyr::select(dplyr::contains(".y"))))
+toc()
+```
+
+# Confusion matrix
+```{r}
+confusion_matrix_selected_features_SOM_results <- purrr::map(seq_along(selected_features_SOM_predictions_validation), function(i) caret::confusionMatrix(selected_features_SOM_predictions_validation[[i]], EmbedSOM_results_test[[i]]$EmbedSOM_results_df$first_gate %>% factor()))
+
+mean_selected_features_SOM_accuracy <- confusion_matrix_selected_features_SOM_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% mean()
+
+sd_selected_features_SOM_accuracy <- confusion_matrix_selected_features_SOM_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% sd()
+
+mean_selected_features_SOM_kappa <- confusion_matrix_selected_features_SOM_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Kappa"]) %>% unlist() %>% mean()
+```
+
+# Test if cross-validation really works with new data
+```{r}
+# facs_test_data_df
+# test_diff_som
+
+# test_diff_som$fs$data <- test_diff_som$fs$data %>% as.data.frame() %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+
+test_diff_som$fs$data <- test_diff_som$fs$data %>% 
+  as.data.frame() %>% 
+  purrr::set_names(str_remove(string = colnames(test_diff_som$fs$data), pattern = "FJComp.")) %>% 
+  as.matrix()
+
+test_df <- facs_test_data_df %>% dplyr::select(-c(cell_type, first_gate))
+
+EmbedSOM_results_testing <- perform_SOM(diff_som = test_diff_som, facs_data_df = facs_test_data_df, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE)
+
+test_selected_features_SOM_results <- purrr::map(seq_along(rules_models_SOM_selected_features), function(i) predict(rules_models_SOM_selected_features[[i]], newdata = EmbedSOM_results_testing$EmbedSOM_results_df %>% dplyr::select(dplyr::contains(".y"))))
+
+confusion_matrix_test_selected_SOM_features_results <- purrr::map(seq_along(test_selected_features_SOM_results), function(i) caret::confusionMatrix(test_selected_features_SOM_results[[i]], facs_test_data_df$first_gate %>% factor()))
+
+confusion_matrix_test_selected_SOM_features_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% mean()
+
+confusion_matrix_test_selected_SOM_features_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Kappa"]) %>% unlist() %>% mean()
+```
+
+
+
+
+# Since the winner strategy is SOM - selected features - normalize weights, let's apply it to the whole dataset:
+```{r}
+tic()
+EmbedSOM_results_whole_data <- perform_SOM(diff_som = diff_som_1, facs_data_df = facs_data_subset_df, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE)
+toc()
+
+tic()
+step_1_rules_models_SOM_selected_features <- process_C5_from_SOM(df = EmbedSOM_results_whole_data$EmbedSOM_results_df, features = dplyr::contains(".y"))
+toc()
+
+selected_features_SOM_classification <- predict(step_1_rules_models_SOM_selected_features, newdata = )
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# SOM - all features
+```{r}
+# 344.531 sec elapsed
+# 360.017 sec elapsed
+tic()
+# EmbedSOM_all_features_results_train <- purrr::map(seq_along(diff_som_1_train), function(i) perform_SOM(diff_som = diff_som_1_train[[i]], facs_data_subset_df[-test_indices[[i]], ], columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = TRUE))
+EmbedSOM_all_features_results_train <- purrr::map(seq_along(diff_som_1_train), function(i) perform_SOM(diff_som = diff_som_1_train[[i]], facs_data_subset_df[-test_indices[[i]], ], columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = TRUE))
+toc()
+
+# 65.526 sec elapsed
+# 67.667 sec elapsed
+tic()
+# EmbedSOM_all_features_results_test <- purrr::map(seq_along(diff_som_1_test), function(i) perform_SOM(diff_som = diff_som_1_test[[i]], facs_data_subset_df[test_indices[[i]], ], columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = TRUE))
+EmbedSOM_all_features_results_test <- purrr::map(seq_along(diff_som_1_test), function(i) perform_SOM(diff_som = diff_som_1_test[[i]], facs_data_subset_df[test_indices[[i]], ], columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = TRUE))
+toc()
+```
+
+# C5.0 on SOM
+```{r}
+registerDoParallel(cores = 5)
+# 104.557 sec elapsed
+tic()
+rules_models_SOM_all_features <- EmbedSOM_all_features_results_train %>% purrr::map(function(x) x %>% .[["EmbedSOM_results_df"]] %>% process_C5_from_SOM(features = dplyr::contains(".y")))
+
+# rules_models_SOM_all_features <- foreach(i = seq_along(EmbedSOM_all_features_results_train)) %dopar% process_C5_from_SOM(df = EmbedSOM_all_features_results_train[[i]]$EmbedSOM_results_df, features = dplyr::contains(".y"))
+toc()
+
+# EmbedSOM_results_train[[1]]$diff_som$map$codes
+# EmbedSOM_results_train[[1]]$EmbedSOM_results_df
+
+# rules_models_SOM_all_features %>% saveRDS(file = "~/Downloads/rules_models_SOM_all_features.rds")
+```
+
+
+# Validate
+```{r}
+# 8.65 sec elapsed
+tic()
+all_features_SOM_predictions_validation <- purrr::map(seq_along(rules_models_SOM_all_features), function(i) predict(rules_models_SOM_all_features[[i]], newdata = EmbedSOM_all_features_results_test[[i]]$EmbedSOM_results_df %>% dplyr::select(dplyr::contains(".y"))))
+toc()
+```
+
+# Confusion matrix
+```{r}
+confusion_matrix_all_features_SOM_results <- purrr::map(seq_along(all_features_SOM_predictions_validation), function(i) caret::confusionMatrix(all_features_SOM_predictions_validation[[i]], EmbedSOM_all_features_results_test[[i]]$EmbedSOM_results_df$first_gate %>% factor()))
+
+mean_all_features_SOM_accuracy <- confusion_matrix_all_features_SOM_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% mean()
+
+sd_all_features_SOM_accuracy <- confusion_matrix_all_features_SOM_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% sd()
+
+mean_all_features_SOM_kappa <- confusion_matrix_all_features_SOM_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Kappa"]) %>% unlist() %>% mean()
+```
+
+# Test if cross-validation really works with new data
+```{r}
+# facs_test_data_df
+# test_diff_som
+
+# test_diff_som$fs$data <- test_diff_som$fs$data %>% as.data.frame() %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+
+test_diff_som$fs$data <- test_diff_som$fs$data %>% 
+  as.data.frame() %>% 
+  purrr::set_names(str_remove(string = colnames(test_diff_som$fs$data), pattern = "FJComp.")) %>% 
+  as.matrix()
+
+test_df <- facs_test_data_df %>% dplyr::select(-c(cell_type, first_gate))
+
+EmbedSOM_all_features_results_testing <- perform_SOM(diff_som = test_diff_som, facs_data_df = facs_test_data_df, columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = TRUE)
+
+test_all_features_SOM_results <- purrr::map(seq_along(rules_models_SOM_all_features), function(i) predict(rules_models_SOM_all_features[[i]], newdata = EmbedSOM_all_features_results_testing$EmbedSOM_results_df %>% dplyr::select(dplyr::contains(".y"))))
+
+confusion_matrix_test_all_SOM_features_results <- purrr::map(seq_along(test_all_features_SOM_results), function(i) caret::confusionMatrix(test_all_features_SOM_results[[i]], facs_test_data_df$first_gate %>% factor()))
+
+
+
+
+
+
+mean_selected_all_features_SOM_accuracy <- confusion_matrix_test_all_SOM_features_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% mean()
+
+sd_selected_all_features_SOM_accuracy <- confusion_matrix_test_all_SOM_features_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Accuracy"]) %>% unlist() %>% sd()
+
+mean_selected_all_features_SOM_kappa <- confusion_matrix_test_all_SOM_features_results %>% purrr::map(function(x) x %>% .[["overall"]] %>% .["Kappa"]) %>% unlist() %>% mean()
+```
+
+
+
+
+# SOM - Selected features was selected for Step 1
+```{r}
+diff_som_1$fs$data <- diff_som_1$fs$data %>% as.data.frame() %>% dplyr::select(-c("cell_type", "first_gate")) %>% as.matrix() %>% apply(MARGIN = c(2), as.numeric)
+
+tic()
+# EmbedSOM_results_train <- purrr::map(seq_along(diff_som_1_train), function(i) perform_SOM(diff_som = diff_som_1_train[[i]], facs_data_subset_df[-test_indices[[i]], ], columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE))
+EmbedSOM_results_step_1 <- perform_SOM(diff_som = diff_som_1, facs_data_subset_df, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = FALSE)
+toc()
+
+tic()
+rules_model <- process_C5_from_SOM(df = EmbedSOM_results_step_1$EmbedSOM_results_df, features = dplyr::contains(".y"))
+toc()
+
+test_diff_som$fs$data <- test_diff_som$fs$data %>% 
+  as.data.frame() %>% 
+  purrr::set_names(str_remove(string = colnames(test_diff_som$fs$data), pattern = "FJComp.")) %>% 
+  as.matrix()
+
+test_df <- facs_test_data_df %>% dplyr::select(-c(cell_type, first_gate))
+
+EmbedSOM_results_testing <- perform_SOM(diff_som = test_diff_som, facs_data_df = facs_test_data_df, columns_to_use = c("FSC.A", "FSC.H", "SSC.A", "SSC.W", "Indo.1..Violet..A"), importance = c(1, 1, 1, 1, 1), normalize_weights = TRUE)
+
+test_rules_model <- predict(rules_model, newdata = EmbedSOM_results_testing$EmbedSOM_results_df %>% dplyr::select(dplyr::contains(".y")))
+
+confusion_matrix <- caret::confusionMatrix(test_rules_model, facs_test_data_df$first_gate %>% factor())
+
+confusion_matrix %>% .[["overall"]] %>% .["Accuracy"]
+
+confusion_matrix %>% .[["overall"]] %>% .["Kappa"]
+```
+
+
+```{r}
+
+```
+
+```{r}
+train_df <- vroom::vroom(paste0(source_path, "home/trufenc/balanced_data_2_classes_first_gate.tsv"), delim = "\t")
+```
+
+```{r}
+test_df <- vroom::vroom(paste0(source_path, "home/trufenc/balanced_test_data_2_classes_first_gate.tsv"), delim = "\t")
+```
+
+# normalize data
+```{r}
+# normalize data
+normally_dstributed_test_list <- test_df %>% dplyr::select(-c(Time, cell_type, first_gate)) %>% purrr::map(bestNormalize::orderNorm)
+normally_dstributed_test_df <- purrr::map(seq_along(normally_dstributed_test_list), function(i) normally_dstributed_test_list[[i]]$x.t) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% purrr::set_names(colnames(test_df)[1:18]) %>% mutate(first_gate = test_df$first_gate)
+test_df <- normally_dstributed_test_df
+
+normally_dstributed_train_list <- train_df %>% dplyr::select(-c(Time, cell_type, first_gate)) %>% purrr::map(bestNormalize::orderNorm)
+normally_dstributed_train_df <- purrr::map(seq_along(normally_dstributed_train_list), function(i) normally_dstributed_train_list[[i]]$x.t) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% purrr::set_names(colnames(train_df)[1:18]) %>% mutate(first_gate = train_df$first_gate)
+train_df <- normally_dstributed_train_df
+```
+
+# Selected features
+```{r}
+train_df <- train_df %>% dplyr::select(c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A", "first_gate"))
+
+test_df <- test_df %>% dplyr::select(c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A", "first_gate"))
+```
+
+
+```{r}
+step_1_levels <- train_df$first_gate %>% unique()
+n_classes <- length(step_1_levels)
+```
+
+```{r}
+classes_number <- data.frame(
+  classes = step_1_levels,
+  Number = 1:length(step_1_levels)
+  )
+```
+
+```{r}
+test_label <- test_df %>% 
+  dplyr::select(first_gate) %>% 
+  pull() %>% 
+  str_replace(pattern = "not_live", replacement = "2") %>% 
+  str_replace(pattern = "live", replacement = "1") %>% 
+  as.numeric() %>%
+  '-'(1) 
+
+# test_matrix <- xgb.DMatrix(
+#   data = test_df %>% 
+#     # dplyr::select(-c(Time, cell_type, first_gate)) %>%
+#     dplyr::select(-c(first_gate)) %>%
+#     as.matrix(), 
+#   label = test_label
+#   )
+```
+
+```{r}
+train_label <- train_df %>% 
+  dplyr::select(first_gate) %>% 
+  pull() %>% 
+  str_replace(pattern = "not_live", replacement = "2") %>% 
+  str_replace(pattern = "live", replacement = "1") %>% 
+  as.numeric() %>%
+  '-'(1) 
+
+# train_matrix <- xgb.DMatrix(
+#   data = train_df %>% 
+#     # dplyr::select(-c(Time, cell_type, first_gate)) %>%
+#     dplyr::select(-c(first_gate)) %>%
+#     as.matrix(), 
+#   label = train_label
+#   )
+```
+
+```{r}
+k_fold <- 5
+
+n_round <- 300
+
+# xgboost fitting with arbitrary parameters
+
+# parameter to tune: 
+# nrounds controls the maximum number of iterations. For classification, it is similar to the number of trees to grow.
+# eta controls the learning rate, i.e., the rate at which our model learns patterns in data. Typically, it lies between 0.01 - 0.3
+# gamma controls regularization (or prevents overfitting)
+# max_depth controls the depth of the tree. Larger data sets require deep trees to learn the rules from data.
+# subsample controls the number of samples (observations) supplied to a tree. Typically, its values lie between (0.5-0.8)
+# colsample_bytree control the number of features (variables) supplied to a tree. Typically, its values lie between (0.5,0.9)
+# lambda controls L2 regularization (equivalent to Ridge regression) on weights. It is used to avoid overfitting.
+# alpha controls L1 regularization (equivalent to Lasso regression) on weights. In addition to shrinkage, enabling alpha also results in feature selection. Hence, it's more useful on high dimensional data sets.
+
+# Learning Task Parameters
+## Objective
+### multi:softmax - multiclassification using softmax objective. It returns predicted class labels.
+### multi:softprob - multiclassification using softmax objective. It returns predicted class probabilities.
+
+## eval_metric
+### AUC - Area under curve (used in classification)
+### Logloss - Negative loglikelihood (used in classification)
+### mlogloss - multiclass logloss (used in classification)
+
+# default parameters
+# xgb_params <- list(
+#   booster = "gbtree",
+#   objective = "multi:softprob",
+#   eta = 0.3,
+#   gamma = 0,
+#   max_depth = 6,
+#   min_child_weight = 1,
+#   subsample = 1,
+#   colsample_bytree = 1,
+#   num_class = n_classes,
+#   nthread = 50
+# )
+
+xgb_params <- list(
+  # booster = "gbtree",
+  booster = "dart",
+  objective = "multi:softprob",
+  eta = 0.3,
+  gamma = 6.22,
+  max_depth = 10,
+  min_child_weight = 9.11,
+  subsample = 0.991,
+  colsample_bytree = 0.955,
+  num_class = n_classes,
+  nthread = 50
+)
+
+# fit the model with the arbitrary parameters specified above
+# 4201.047 sec elapsed
+tic()
+xgb_cv_model_1 <- xgb.cv(
+  params = xgb_params,
+  data = train_matrix,
+  nrounds = n_round,
+  nfold = k_fold,
+  showsd = T,
+  stratified = T,
+  print_every_n = 1,
+  early_stopping_rounds = 10,
+  maximize = F,
+  prediction = TRUE
+)
+toc()
+
+# Best iteration: 224
+xgb_cv_model_1$best_iteration
+
+xgb_cv_model_1$evaluation_log %>% dplyr::filter(iter == xgb_cv_model_1$best_iteration) %>% dplyr::select(test_merror_mean) %>% pull
+
+# xgb_cv_model_1 %>% saveRDS(file = paste0(source_path, "home/trufenc/xgb_cv_model_standard_parameters.rds"))
+
+xgb_cv_model_1$evaluation_log %>% 
+  ggplot(aes(x = iter)) +
+  geom_line(aes(y = train_merror_mean, colour = "train")) + 
+  geom_line(aes(y = test_merror_mean, colour = "test"))
+
+# first default - model training
+tic()
+xgb_1 <- xgb.train(
+  params = xgb_params, 
+  data = train_matrix, 
+  nrounds = xgb_cv_model_1$best_iteration, 
+  watchlist = list(val = test_matrix, train = train_matrix), 
+  print_every_n = 1, 
+  early_stopping_rounds = 10, 
+  maximize = F , 
+  eval_metric = "merror"
+  )
+toc()
+
+# model prediction
+xgb_pred <- predict(xgb_1, test_matrix)
+
+test_prediction_df <- matrix(
+  data = xgb_pred,
+  nrow = n_classes,
+  ncol = length(xgb_pred) / n_classes
+  ) %>%
+  t() %>%
+  data.frame()
+
+test_prediction <- test_prediction_df %>%
+  mutate(
+    label = test_label %>% as.numeric() + 1,
+    max_prob = max.col(., "last")
+  )
+
+# xgb_pred <- ifelse(xgb_pred > 0.5, 1, 0)
+
+# confusion matrix
+library(caret)
+confusion_matrix <- confusionMatrix(factor(test_prediction$label), factor(test_prediction$max_prob))
+
+#view variable importance plot
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix), model = xgb_1)
+
+gp = xgb.ggplot.importance(importance_matrix = importance_matrix)
+print(gp)
+```
+
+# Random forest
+```{r}
+library(randomForest)
+library(caTools)
+library(ranger)
+
+rf_train <- train_df %>% mutate(first_gate = train_label %>% factor())
+# rf_train <- train_df %>% dplyr::select(c("FITC.A", "Qdot.605.A", "Pacific.Blue.A", "APC.A", "PE.Cy7.A", "PE.Texas.Red.A", "BV786.A", "PerCP.Cy5.5.A", "first_gate")) %>% mutate(first_gate = train_label %>% factor())
+
+rf_test <- test_df %>% mutate(first_gate = test_label %>% factor())
+# rf_test <- test_df %>% dplyr::select(c("FITC.A", "Qdot.605.A", "Pacific.Blue.A", "APC.A", "PE.Cy7.A", "PE.Texas.Red.A", "BV786.A", "PerCP.Cy5.5.A", "first_gate")) %>% mutate(first_gate = test_label %>% factor())
+
+set.seed(123)
+tic()
+rf_model <- ranger(formula = first_gate ~ ., data = rf_train, num.threads = 50, num.trees = 500, mtry = 4, splitrule = "extratrees")
+toc()
+
+confusionMatrix(rf_train$first_gate, rf_model$predictions)
+
+rf_pred <- predict(rf_model, rf_test %>% dplyr::select(-first_gate))
+
+confusionMatrix(rf_test$first_gate, rf_pred$predictions)
+```
+
+
+
+```{r}
+perform_SOM <- function(diff_som, facs_data_df, columns_to_use = c("FITC.A", "Qdot.605.A", "Pacific.Blue.A", "APC.A", "PE.Cy7.A", "PE.Texas.Red.A", "BV786.A", "PerCP.Cy5.5.A"), importance = rep(1, 8), normalize_weights = TRUE, class_column, ...) {
+  
+  scale_to_range_0_1 <- function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+  
+  diff_som = diff_som
+  
+  # calculate optimal grid
+  vesanto_dim <- diff_som$fs$data %>%
+    nrow() %>%
+    sqrt() %>%
+    "*"(5)
+  
+  grid_dim <- vesanto_dim %>%
+    sqrt() %>%
+    ceiling() %>%
+    "+"(20)
+
+  # SOM
+  reseed()
+  ds <- diff_som %>% Embed(xdim = grid_dim, ydim = grid_dim, colsToUse = columns_to_use, importance = importance, nclust = grid_dim * grid_dim, rlen = 5)
+
+  # Optional to normalize weights
+  if (normalize_weights) {
+    ds$map$codes <- purrr::map(seq_len(ncol(ds$map$codes)), function(i) {ds$map$codes[, i] %>% bestNormalize::orderNorm() %>% .[["x.t"]] %>% scale_to_range_0_1()}) %>% purrr::set_names(colnames(ds$map$codes)) %>% bind_cols()
+  }
+
+  grid_clustering_df <- ds$map$grid %>%
+    as.data.frame() %>%
+    rownames_to_column() %>%
+    mutate(cluster = ds$clust) %>%
+    mutate(rowname = rowname %>% as.numeric()) %>%
+    bind_cols(as.data.frame(ds$map$codes))
+
+  EmbedSOM_results_df <- ds$fs$data %>%
+    as.data.frame() %>%
+    mutate(mapping = ds$map$mapping[, 1]) %>%
+    left_join(grid_clustering_df, by = c("mapping" = "rowname")) %>%
+    mutate(!!class_column := facs_data_df[[class_column]])
+  
+    EmbedSOM_results_df <- EmbedSOM_results_df %>% 
+    dplyr::select(c(dplyr::contains(".y"), class_column)) %>% 
+    purrr::set_names(str_remove(string = colnames(.), pattern = ".y$"))
+  
+  output <- list(weights_df = EmbedSOM_results_df,
+                 diff_som = ds)
+  
+  return(output)
+}
+```
+
+```{r}
+facs_data_df_step_1 <- facs_data_subset_df %>% dplyr::select(-c("Time", "cell_type"))
+```
+
+
+```{r}
+# 1008.069 sec elapsed
+tic()
+EmbedSOM_results_train <- purrr::map(seq_along(diff_som_1_train), function(i) perform_SOM(diff_som = diff_som_1_train[[i]], facs_data_df =  facs_data_df_step_1[-test_indices[[i]], ], columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = FALSE, class_column = "first_gate"))
+toc()
+
+EmbedSOM_results_train %>% saveRDS(paste0(source_path, "home/trufenc/balanced_all_features_EmbedSOM_results_train_step_1.rds"))
+
+# 185.375 sec elapsed
+tic()
+EmbedSOM_results_test <- purrr::map(seq_along(diff_som_1_test), function(i) perform_SOM(diff_som = diff_som_1_test[[i]], facs_data_df_step_1[test_indices[[i]], ], columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = FALSE, class_column = "first_gate"))
+toc()
+
+EmbedSOM_results_test %>% saveRDS(paste0(source_path, "home/trufenc/balanced_all_features_EmbedSOM_results_test_step_1.rds"))
+```
+
+
+```{r}
+EmbedSOM_results_train <- readRDS(paste0(source_path, "home/trufenc/balanced_all_features_EmbedSOM_results_train_step_1.rds"))
+
+EmbedSOM_results_test <- readRDS(paste0(source_path, "home/trufenc/balanced_all_features_EmbedSOM_results_test_step_1.rds"))
+```
+
+
+# RF on SOM
+```{r}
+process_RF_from_SOM <- function(df, class_column, n_trees = 500, m_try = 4, cv_fold = 5, ...){  
+  library(tidyverse, warn.conflicts = FALSE)
+  library(caret, warn.conflicts = FALSE)
+  # library(ranger, warn.conflicts = FALSE)
+  library(randomForest, warn.conflicts = FALSE)
+
+  classes <- df[[class_column]] %>% factor()
+  
+  weights_df <- df %>% dplyr::select(-class_column)
+  
+  # rf_model <- ranger(y = classes, x = weights_df, num.threads = n_threads, num.trees = n_trees, mtry = m_try, splitrule = split_rule)
+  rf_model_cv <- randomForest::rfcv(trainy = classes, trainx = weights_df, cv.fold = cv_fold, num.threads = n_threads, ntree = n_trees, mtry = m_try)
+
+  return(rf_model)
+}
+```
+
+```{r}
+registerDoParallel(cores = 50)
+
+# 65.164 sec elapsed
+tic()
+rf_models_SOM_all_features <- foreach(i = seq_along(EmbedSOM_results_train)) %dopar% process_RF_from_SOM(df = EmbedSOM_results_train[[i]]$weights_df, class_column = "first_gate", n_trees = 500, m_try = 4)
+toc()
+```
+
+# Validate
+```{r}
+# 
+tic()
+selected_features_SOM_predictions_validation <- purrr::map(seq_along(rf_models_SOM_all_features), function(i) predict(rf_models_SOM_all_features[[i]], newdata = EmbedSOM_results_test[[i]]$weights_df %>% dplyr::select(-first_gate)))
+toc()
+```
+
+
+# SOM and Xgboost
+```{r}
+library(xgboost)
+
+# diff_som_1$fs$data
+# 
+
+# EmbedSOM_results_step_1 <- perform_SOM(diff_som = diff_som_1, facs_data_df =  facs_data_df_step_1, columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = TRUE, class_column = "first_gate")
+
+# c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A")
+EmbedSOM_results_step_1 <- perform_SOM(diff_som = diff_som_1, facs_data_df =  train_df, columns_to_use = c(1, 4, 2, 3, 12), importance = rep(1, 5), normalize_weights = FALSE, class_column = "first_gate")
+
+# facs_data_df_step_1 <- facs_test_data_df
+
+test_diff_som_1 <- test_diff_som_1 %>% pre_process_data()
+
+# EmbedSOM_test_results_step_1 <- perform_SOM(diff_som = test_diff_som_1, facs_data_df =  facs_test_data_df, columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = TRUE, class_column = "first_gate")
+
+# c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A")
+EmbedSOM_test_results_step_1 <- perform_SOM(diff_som = test_diff_som_1, facs_data_df =  facs_test_data_df, columns_to_use = c(1, 4, 2, 3, 12), importance = rep(1, 5), normalize_weights = FALSE, class_column = "first_gate")
+
+# shuffle 
+EmbedSOM_results_step_1$weights_df <- EmbedSOM_results_step_1$weights_df[sample(nrow(EmbedSOM_results_step_1$weights_df)),]
+
+set.seed(123)
+test_indices <- sample(nrow(EmbedSOM_results_step_1$weights_df)*.3)
+
+train_label <- EmbedSOM_results_step_1$weights_df[test_indices, ] %>% 
+  dplyr::select(first_gate) %>% 
+  pull() %>% 
+  str_replace(pattern = "not_live", replacement = "2") %>% 
+  str_replace(pattern = "live", replacement = "1") %>% 
+  as.numeric() %>%
+  '-'(1)
+
+train_matrix <- xgb.DMatrix(
+  data = EmbedSOM_results_step_1$weights_df[test_indices, ] %>%
+    # dplyr::select(-c(Time, cell_type, first_gate)) %>%
+    dplyr::select(-c(first_gate)) %>%
+    as.matrix(),
+  label = train_label
+  )
+
+test_label <- EmbedSOM_results_step_1$weights_df[-test_indices, ] %>% 
+  dplyr::select(first_gate) %>% 
+  pull() %>% 
+  str_replace(pattern = "not_live", replacement = "2") %>% 
+  str_replace(pattern = "live", replacement = "1") %>% 
+  as.numeric() %>%
+  '-'(1)
+
+test_matrix <- xgb.DMatrix(
+  data = EmbedSOM_results_step_1$weights_df[-test_indices, ] %>%
+    # dplyr::select(-c(Time, cell_type, first_gate)) %>%
+    dplyr::select(-c(first_gate)) %>%
+    as.matrix(),
+  label = test_label
+  )
+
+# binary
+process_XGB_from_SOM_step_1 <- function(train_matrix, class_column, n_round = 300, k_fold = 10, n_classes = 2, ...) {
+  library(tidyverse, warn.conflicts = FALSE)
+  library(caret, warn.conflicts = FALSE)
+  # library(ranger, warn.conflicts = FALSE)
+  library(randomForest, warn.conflicts = FALSE)
+
+  xgb_params <- list(
+    booster = "gbtree",
+    objective = "binary:logistic",
+    eta = 0.3,
+    gamma = 0,
+    max_depth = 6,
+    min_child_weight = 1,
+    subsample = 1,
+    colsample_bytree = 1,
+    num_class = n_classes,
+    nthread = 50
+  )
+  xgb_cv_model_1 <- xgb.cv(
+    params = xgb_params,
+    data = train_matrix,
+    nrounds = n_round,
+    nfold = k_fold,
+    showsd = T,
+    stratified = T,
+    print_every_n = 1,
+    early_stopping_rounds = 10,
+    maximize = F,
+    prediction = TRUE
+  )
+
+  xgb_1 <- xgb.train(
+    params = xgb_params,
+    data = train_matrix,
+    nrounds = xgb_cv_model_1$best_iteration,
+    watchlist = list(val = test_matrix, train = train_matrix),
+    print_every_n = 1,
+    early_stopping_rounds = 10,
+    maximize = F,
+    eval_metric = "error"
+  )
+
+  return(xgb_1)
+}
+```
+
+```{r}
+tic()
+xgb_models_SOM_all_features <- process_XGB_from_SOM_step_1(train_matrix = train_matrix)
+toc()
+
+# model prediction
+xgb_pred <- predict(xgb_models_SOM_all_features, test_matrix)
+
+n_classes <- 2
+
+test_prediction_df <- matrix(
+  data = xgb_pred,
+  nrow = n_classes,
+  ncol = length(xgb_pred) / n_classes
+  ) %>%
+  t() %>%
+  data.frame()
+
+test_prediction <- test_prediction_df %>%
+  mutate(
+    label = test_label %>% as.numeric() + 1,
+    max_prob = max.col(., "last")
+  )
+
+# xgb_pred <- ifelse(xgb_pred > 0.5, 1, 0)
+
+# confusion matrix
+library(caret)
+confusion_matrix <- confusionMatrix(factor(test_prediction$label), factor(test_prediction$max_prob))
+
+#view variable importance plot
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix), model = xgb_models_SOM_all_features)
+
+gp = xgb.ggplot.importance(importance_matrix = importance_matrix)
+print(gp)
+```
+
+# Evaluate on an independent dataset
+```{r}
+EmbedSOM_test_results_step_1$weights_df <- EmbedSOM_test_results_step_1$weights_df %>% purrr::set_names(str_remove(string = colnames(EmbedSOM_test_results_step_1$weights_df), pattern = "FJComp."))
+
+eval_label <- EmbedSOM_test_results_step_1$weights_df %>% 
+  dplyr::select(first_gate) %>% 
+  pull() %>% 
+  str_replace(pattern = "not_live", replacement = "2") %>% 
+  str_replace(pattern = "live", replacement = "1") %>% 
+  as.numeric() %>%
+  '-'(1)
+
+eval_matrix <- xgb.DMatrix(
+  data = EmbedSOM_test_results_step_1$weights_df %>%
+    # dplyr::select(-c(Time, cell_type, first_gate)) %>%
+    dplyr::select(-c(first_gate)) %>%
+    as.matrix(),
+  label = eval_label
+  )
+
+# model prediction
+xgb_pred <- predict(xgb_models_SOM_all_features, eval_matrix)
+
+n_classes <- 2
+
+eval_prediction_df <- matrix(
+  data = xgb_pred,
+  nrow = n_classes,
+  ncol = length(xgb_pred) / n_classes
+  ) %>%
+  t() %>%
+  data.frame()
+
+eval_prediction <- eval_prediction_df %>%
+  mutate(
+    label = eval_label %>% as.numeric() + 1,
+    max_prob = max.col(., "last")
+  )
+
+# xgb_pred <- ifelse(xgb_pred > 0.5, 1, 0)
+
+# confusion matrix
+library(caret)
+confusion_matrix <- confusionMatrix(factor(eval_prediction$label), factor(eval_prediction$max_prob))
+
+#view variable importance plot
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix), model = xgb_models_SOM_all_features)
+
+gp = xgb.ggplot.importance(importance_matrix = importance_matrix)
+print(gp)
+
+```
+
+
+
+```{r}
+test_diff_som_1 <- test_diff_som_1 %>% pre_process_data()
+```
+
+# SOM and Random Forest
+```{r}
+library(ranger)
+
+# diff_som_1$fs$data
+# 
+
+# EmbedSOM_results_step_1 <- perform_SOM(diff_som = diff_som_1, facs_data_df =  facs_data_df_step_1, columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = FALSE, class_column = "first_gate")
+
+# c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A")
+EmbedSOM_results_step_1 <- perform_SOM(diff_som = diff_som_1, facs_data_df =  train_df, columns_to_use = c(1, 4, 2, 6, 12), importance = rep(1, 5), normalize_weights = TRUE, class_column = "first_gate")
+
+# facs_data_df_step_1 <- facs_test_data_df
+
+# EmbedSOM_test_results_step_1 <- perform_SOM(diff_som = test_diff_som_1, facs_data_df =  facs_test_data_df, columns_to_use = c(1:18), importance = rep(1, 18), normalize_weights = FALSE, class_column = "first_gate")
+
+# c("FSC.A", "SSC.A", "FSC.H", "SSC.W", "Indo.1..Violet..A")
+EmbedSOM_test_results_step_1 <- perform_SOM(diff_som = test_diff_som_1, facs_data_df =  test_df, columns_to_use = c(1, 4, 2, 6, 12), importance = rep(1, 5), normalize_weights = TRUE, class_column = "first_gate")
+
+# shuffle 
+# EmbedSOM_results_step_1$weights_df <- EmbedSOM_results_step_1$weights_df[sample(nrow(EmbedSOM_results_step_1$weights_df)),]
+```
+
+# Random forest
+```{r}
+# rf_train <- EmbedSOM_results_step_1$weights_df %>% mutate(first_gate = first_gate %>% as.character)
+
+rf_train <- EmbedSOM_results_step_1$weights_df %>% mutate(first_gate = first_gate %>% factor(levels = c("live", "not_live")))
+# rf_train <- train_df %>% dplyr::select(c("FITC.A", "Qdot.605.A", "Pacific.Blue.A", "APC.A", "PE.Cy7.A", "PE.Texas.Red.A", "BV786.A", "PerCP.Cy5.5.A", "first_gate")) %>% mutate(first_gate = train_label %>% factor())
+
+rf_test <- EmbedSOM_test_results_step_1$weights_df  %>% purrr::set_names(str_remove(string = colnames(EmbedSOM_test_results_step_1$weights_df), pattern = "FJComp.")) %>% mutate(first_gate = first_gate %>% factor(levels = c("live", "not_live")))
+# rf_test <- test_df %>% dplyr::select(c("FITC.A", "Qdot.605.A", "Pacific.Blue.A", "APC.A", "PE.Cy7.A", "PE.Texas.Red.A", "BV786.A", "PerCP.Cy5.5.A", "first_gate")) %>% mutate(first_gate = test_label %>% factor())
+
+# binary
+process_RF_from_SOM_step_1 <- function(rf_train, rf_test, class_column, n_threads = 50, n_trees = 500, m_try = 4, split_rule = splitrule, ...) {
+  library(tidyverse, warn.conflicts = FALSE)
+  library(caret, warn.conflicts = FALSE)
+  library(ranger, warn.conflicts = FALSE)
+  library(randomForest, warn.conflicts = FALSE)
+
+  set.seed(123)
+  rf_model <- ranger(data = rf_train, formula = first_gate ~ ., num.threads = n_threads, num.trees = n_trees, mtry = m_try, splitrule = split_rule)
+
+  confusionMatrix(rf_train$first_gate, rf_model$predictions)
+
+  rf_pred <- predict(rf_model, rf_test %>% dplyr::select(-first_gate))
+
+  confusionMatrix(rf_test$first_gate, rf_pred$predictions)
+  
+  return(rf_model)
+}
+
+```
+
+```{r}
+  set.seed(123)
+
+  # rf_model <- ranger(data = rf_train, formula = first_gate ~ ., num.threads = 50, num.trees = 1500, mtry = 1, splitrule = "extratrees", min.node.size = 3, max.depth = 17)
+
+  rf_model <- ranger(data = rf_train, formula = first_gate ~ ., num.threads = 50, num.trees = 500, mtry = 1, splitrule = "gini", min.node.size = 1, max.depth = 1)  
+  
+  confusionMatrix(rf_train$first_gate, rf_model$predictions)
+
+  rf_pred <- predict(rf_model, rf_test %>% dplyr::select(-first_gate))
+
+  confusionMatrix(rf_test$first_gate, rf_pred$predictions)
+
+# process_RF_from_SOM_step_1(rf_train, rf_test, class_column = "first_gate", n_threads = 50, n_trees = 500, m_try = 4, split_rule = "extratrees")
+  
+# rf_model %>% saveRDS(file = paste0(source_path, "home/trufenc/rf_model_from_SOM_nor_normalized_weights_step_1.rds"))
+```
+
+```{r}
+  set.seed(123)
+  # rf_model <- ranger(data = rf_train, formula = first_gate ~ ., num.threads = 50, num.trees = 500, mtry = 4, splitrule = "extratrees")
+
+  rf_model_list <- purrr::map(seq(from = 500, to = 2000, by = 100), function(i) ranger(data = rf_train, formula = first_gate ~ ., num.threads = 50, num.trees = i, mtry = 1, splitrule = "extratrees", min.node.size = 3, max.depth = 17))
+  
+  cm_train_list <- purrr::map(seq_along(rf_model_list), function(i) confusionMatrix(rf_train$first_gate, rf_model_list[[i]]$predictions))
+
+  cm_train_df <- cm_train_list %>% purrr::map(function(x) x %>% .$overall %>% t() %>% as.data.frame()) %>% bind_rows()
+  
+  rf_pred_list <- purrr::map(seq_along(rf_model_list), function(i) predict(rf_model_list[[i]], rf_test %>% dplyr::select(-first_gate)))
+
+  cm_test_list <- purrr::map(seq_along(rf_model_list), function(i) confusionMatrix(rf_test$first_gate, rf_pred_list[[i]]$predictions))
+  
+  cm_test_df <- cm_test_list %>% purrr::map(function(x) x %>% .$overall %>% t() %>% as.data.frame()) %>% bind_rows()
+  
+  acc_data <- data.frame(train_acc = cm_train_df$Accuracy,
+             eval_acc = cm_test_df$Accuracy,
+             num.trees = seq(from = 500, to = 2000, by = 100))
+  
+  acc_data %>% tidyr::gather(key = "key", value = "value", -num.trees) %>% ggplot(aes(x = num.trees, y = value, colour = key)) + geom_line()
+  
+  kappa_data <- data.frame(train_kappa = cm_train_df$Kappa,
+             eval_kappa = cm_test_df$Kappa,
+             num.trees = seq(from = 500, to = 2000, by = 100))
+  
+  kappa_data %>% tidyr::gather(key = "key", value = "value", -num.trees) %>% ggplot(aes(x = num.trees, y = value, colour = key)) + geom_line()
+  
+  # cm_train_list[[i]]$overall
+```
+
+```{r}
+set.seed(123)
+step_1_model <- ranger(data = rf_train, formula = first_gate ~ ., num.threads = 50, num.trees = 500, mtry = 4, splitrule = "extratrees", min.node.size = 4, max.depth = 10)
+```
+

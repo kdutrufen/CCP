@@ -1,0 +1,836 @@
+---
+title: "Goretti_protein_interactome_STA-2023-053"
+author: "Carlos Eduardo Madureira Trufen"
+date: "2023-08-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r}
+library(broom)
+library(ggrepel)
+library(gridExtra)
+library(lme4)
+library(multcomp)
+library(readxl)
+library(tidyr)
+library(tidyverse)
+
+path_to_data <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/protein_interactome_Goretti/"
+# path_to_data <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/protein_interactome_Goretti/"
+```
+
+# Load data
+```{r}
+# df_list <- list(
+#   df_1 = read_excel(paste0(path_to_data, "20230714_Goretti_1372.xlsx"), sheet = 1),
+# 
+#   df_2 = read_excel(paste0(path_to_data, "20230714_Goretti_1372.xlsx"), sheet = 2)
+# )
+
+# df_list <- list(
+#   df_1 = read_excel(paste0(path_to_data, "20230828_Goretti_1391-900.xlsx"), sheet = 1)
+# )
+
+# df_list <- list(
+#   df_1 = read_csv("~/Downloads/2023-10-06 Statistics noise bellow 18.csv")
+# )
+
+df <- read_excel(paste0(path_to_data, "20220520_Goretti.xlsx"), sheet = 1, skip = 2)
+
+# df <- df %>% purrr:::map(dplyr::select, c("T: Protein IDs", "T: Majority protein IDs",  "T: Protein names", "T: Gene names", "tent_cyto_x-y_lipo_cyto...12")) # "tent_cyto" vs "lipo_cyto"
+df <- df %>% dplyr::select(c("T: Protein IDs", "T: Majority protein IDs",  "T: Protein names", "T: Gene names", "lipo_cyto", "lipo_cyto2", "tent_cyto", "tent_cyto2")) # "tent_cyto" vs "lipo_cyto"
+df <- df %>% mutate_at(c("lipo_cyto", "lipo_cyto2", "tent_cyto", "tent_cyto2"), .fun = as.numeric)
+df <- df %>% mutate_at(c("lipo_cyto", "lipo_cyto2", "tent_cyto", "tent_cyto2"), .fun = as.numeric)
+df <- df %>% mutate_all(~replace(., is.nan(.), 0.0000))
+
+# tent_cyto_x-y_lipo_cyto
+```
+
+# Statistical analysis for 20220520_Goretti.xlsx
+```{r}
+df_long <- df %>%
+  dplyr::select(c("T: Protein IDs", "lipo_cyto", "lipo_cyto2", "tent_cyto", "tent_cyto2")) %>% 
+  gather(-"T: Protein IDs", value = "expression", key = "sample") %>%
+  mutate(group = sample %>% str_remove(pattern = "2")) %>%
+  mutate(exp = expression + 0.0001)
+  # mutate(minimum = expression %>% min(na.rm = TRUE)) %>%
+  # rowwise() %>%
+  # mutate(exp = if_else(is.na(expression), rnorm(1, minimum, 0.2), expression)) %>%
+  # ungroup() %>%
+  # mutate(minimum = min(exp, na.rm = TRUE), exp = exp - minimum)
+
+genes <- unique(df_long$`T: Protein IDs`)
+i <- genes[3]
+
+
+# stat_list <- purrr::map(seq_along(genes), function(i){
+#   gene <- genes[i]
+#   df <- df_long %>% dplyr::filter(`T: Protein IDs` == gene)
+#   stat_resut <- tidy(lm(exp ~ group, data = df2))
+#   stat_resut <- stat_resut %>% mutate(var = gene)
+# })
+# 
+# stat_df <- stat_list %>% 
+#   purrr::map(dplyr::slice, 2) %>% 
+#   bind_rows()
+  
+
+stat_df <- data.frame()
+for (i in genes) {
+  df2 <- df_long %>% dplyr::filter(`T: Protein IDs` == i)
+  stat_resut <- tidy(lm(exp ~ group, data = df2))
+  stat_resut <- stat_resut %>% mutate(var = i)
+  stat_resut <- stat_resut[2, ]
+  mean_df <- df2 %>% group_by(group) %>% 
+    summarize(mean = mean(exp))
+  stat_resut <- stat_resut %>% mutate(FC = mean_df$mean[2]/mean_df$mean[1])
+  stat_resut <- stat_resut %>% mutate(LFC = FC %>% log2)
+  stat_df <- rbind(stat_df, stat_resut)
+}
+
+stat_df <- stat_df %>% full_join(df, by = c("var" = "T: Protein IDs"))
+
+stat_df <- stat_df %>% separate(col = `T: Gene names`, into = c("gene", "alias"), sep = ";", extra = "merge", fill = "right")
+
+p_value_threshold <- 0.01
+rh <- 1.5
+rl <- -1.5
+
+stat_df <- stat_df %>%
+  mutate(FDR = p.value %>% p.adjust()) %>% 
+  mutate(significance = if_else(condition = (abs(estimate) > rh) & p.value < p_value_threshold,
+                                true = "significant", 
+                                false = "non significant")) %>%
+  mutate(labels = if_else(condition = p.value < p_value_threshold, 
+                          true = gene, 
+                          false = ""), 
+         p_log = -(p.value %>% log(10)))
+
+
+stat_df %>% 
+  ggplot(aes(x = estimate, y = p_log, col = significancy)) +
+  geom_point() +
+  geom_label_repel(
+    data = subset(stat_df, estimate > rh & p.value < p_value_threshold),
+    aes(label = labels),
+    box.padding = 0.35, force = 10,
+    point.padding = 0.5,
+    arrow = arrow(length = unit(0.01, "npc"), type = "open", ends = "first"),
+    xlim = c(rh, NA)
+  ) # +
+  # scale_colour_manual(values = c("black", "darkred", "darkgreen", "darkblue")) +
+  # theme_bw() +
+  # theme(legend.position = "bottom") +
+  # labs(x = "Fold change", y = "-log10 p.value") +
+  # geom_segment(aes(x = rh, xend = 8, y = -log(p.value, 10), yend = -log(p.value, 10))) +
+  # geom_segment(aes(x = rh, xend = rh, y = -log(p.value, 10), yend = 4)) +
+  # geom_segment(aes(x = -8, xend = rl, y = -log(p.value, 10), yend = -log(p.value, 10))) +
+  # geom_segment(aes(x = rl, xend = rl, y = -log(p.value, 10), yend = 4))
+
+# ggsave(paste0(Sys.Date(), " Vulcano plot p value less than ", pval, " .jpg"))
+# write.csv(stat, "Statistics.csv")
+# 
+# df1 %>%
+#   dplyr::select(-MIN, -expression, -Group) %>%
+#   spread(key = sample, value = Exp) %>%
+#   write.csv("Raw data filled.csv")
+
+p_value_thresholds <- c(0.01, 0.03, 0.05)
+rh <- 1.5
+
+stat_df <- stat_df %>% mutate(gene = gene %>% dplyr::recode(Fam46a = "Tent5a"))
+
+stat_list <- purrr::map(seq_along(p_value_thresholds), function(i) {
+  stat_df %>%
+    mutate(FDR = p.value %>% p.adjust()) %>% 
+    mutate(significance = if_else(condition = (abs(estimate) > rh) & p.value < p_value_thresholds[i],
+                                  true = "significant", 
+                                  false = "non significant")) %>%
+    mutate(labels = if_else(condition = p.value < p_value_thresholds[i], 
+                            true = gene, 
+                            false = ""), 
+           p_log = -(p.value %>% log(10)))
+})
+
+volcano_plot_list <- purrr::map(seq_along(p_value_thresholds), function(i) {
+  stat_list[[i]] %>% 
+    ggplot(aes(x = estimate, y = p_log, col = significance)) +
+    geom_point() +
+    geom_label_repel(
+      data = subset(stat_list[[i]], estimate > rh & p.value < p_value_thresholds[i]),
+      aes(label = labels),
+      box.padding = 0.35, force = 10,
+      point.padding = 0.5,
+      arrow = arrow(length = unit(0.01, "npc"), type = "open", ends = "first"),
+      xlim = c(rh, NA)
+  ) +
+    ggeasy::easy_text_size(size = 15)
+})
+
+
+purrr::map(seq_along(volcano_plot_list), function(i) {
+  ggsave(filename = paste0(path_to_data, "volcano_plot_p_value_threshold_", p_value_thresholds[i], "_width_10_height_7.png"), 
+         width = 10, 
+         height = 7, 
+         dpi = 900)
+  })
+
+
+
+# With FDR and LFC
+# fdr_threshold <- 0.0
+# lfc_threshold <- 1
+# 
+# 
+# 
+# stat_df <- stat_df %>%
+#   mutate(FDR = p.value %>% p.adjust()) %>% 
+#   mutate(significancy = if_else(condition = (abs(LFC) > lfc_threshold) & FDR < fdr_threshold,
+#                                 true = "significant", 
+#                                 false = "non significant")) %>%
+#   mutate(labels = if_else(condition = FDR < fdr_threshold, 
+#                           true = `T: Gene names`, 
+#                           false = ""), 
+#          FDR_log = -(p.value %>% log(10)))
+# 
+# 
+# 
+# stat_df %>% 
+#   ggplot(aes(x = LFC, y = p_log, col = significancy)) +
+#   geom_point() +
+#   geom_label_repel(
+#     data = subset(stat_df, LFC > lfc_threshold & FDR < fdr_threshold),
+#     aes(label = labels),
+#     box.padding = 0.35, force = 10,
+#     point.padding = 0.5,
+#     arrow = arrow(length = unit(0.01, "npc"), type = "open", ends = "first"),
+#     xlim = c(rh, NA)
+#   ) 
+
+ora_analysis <- function(genes_list, database = KEGG_2019_Human, pvalue_cutoff = 1, qvalue_cutoff = 1, p.adjust_cutoff = 0.1, count_at_least = 3){
+  library(clusterProfiler)
+  library(tidyverse)
+  gmt_df <- database %>% clusterProfiler::read.gmt()
+  terms_list <- gmt_df %>% split(f = .$term) %>% purrr::map(pull, gene)
+  genes_set <- gmt_df[, "gene"] %>% unique()
+  enrichment_result <- genes_list %>% 
+    purrr::map(clusterProfiler::enricher, pvalueCutoff = pvalue_cutoff, qvalueCutoff = qvalue_cutoff, universe = genes_set, TERM2GENE = gmt_df)
+  clProf.df <- enrichment_result %>% purrr::map(as.data.frame) %>% bind_rows(.id = "Cluster")
+  clProf.df <- clProf.df %>% dplyr::filter(p.adjust < p.adjust_cutoff & Count >= count_at_least)
+  geneClusters <- genes_list
+  compareCluster_output <- new("compareClusterResult", 
+                               compareClusterResult = clProf.df, 
+                               geneClusters = list(geneClusters), 
+                               fun = "enricher",
+                               .call = match.call(expand.dots = TRUE))
+  return(compareCluster_output)
+}
+
+path_to_gmt <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/GMT/"
+GO_Biological_Process_2018 <- paste0(path_to_gmt, "GO_Biological_Process_2018.txt") # GO_Biological_Process_2018 gene sets
+GO_Biological_Process_2021 <- paste0(path_to_gmt, "GO_Biological_Process_2021.txt") # GO_Biological_Process_2021 gene sets
+GO_Biological_Process_2023 <- paste0(path_to_gmt, "GO_Biological_Process_2023.txt") # GO_Biological_Process_2018 gene sets
+
+# ORA GO BP
+gene_list <- stat_list[[3]] %>% 
+  dplyr::filter(estimate > rh) %>% 
+  dplyr::filter(p.value < p_value_thresholds) %>% 
+  pull(gene) %>% 
+  str_to_upper() %>% 
+  sort() %>% 
+  list()
+
+
+ora_results_GO_BP_2018 <- gene_list %>% ora_analysis(database = GO_Biological_Process_2018)
+GO_BP_2018_dotplot <- ora_results_GO_BP_2018 %>% clusterProfiler::dotplot()
+
+ora_results_GO_BP_2021 <- gene_list %>% ora_analysis(database = GO_Biological_Process_2021)
+GO_BP_2021_dotplot <- ora_results_GO_BP_2021 %>% clusterProfiler::dotplot()
+
+ora_results_GO_BP_2023 <- gene_list %>% ora_analysis(database = GO_Biological_Process_2023)
+GO_BP_2023_dotplot <- ora_results_GO_BP_2023 %>% clusterProfiler::dotplot()
+
+ora_results_GO_BP_2018@compareClusterResult %>% vroom::vroom_write(file = paste0(path_to_data, "ora_results_GO_BP_2018.csv"), delim = ",")
+ora_results_GO_BP_2021@compareClusterResult %>% vroom::vroom_write(file = paste0(path_to_data, "ora_results_GO_BP_2021.csv"), delim = ",")
+ora_results_GO_BP_2023@compareClusterResult %>% vroom::vroom_write(file = paste0(path_to_data, "ora_results_GO_BP_2023.csv"), delim = ",")
+
+GO_BP_2018_dotplot %>% ggsave(filename = paste0(path_to_data, "ora_results_GO_BP_2018.png"), height = 5, width = 7, dpi = 900)
+GO_BP_2021_dotplot %>% ggsave(filename = paste0(path_to_data, "ora_results_GO_BP_2021.png"), height = 5, width = 7, dpi = 900)
+GO_BP_2023_dotplot %>% ggsave(filename = paste0(path_to_data, "ora_results_GO_BP_2023.png"), height = 5, width = 7, dpi = 900)
+```
+
+
+```{r}
+data <- read_csv("~/PRIMUS/data/83_BIOINFORMATICS/Kadu/protein_interactome_Goretti/data.csv")
+data <- data %>% 
+  dplyr::filter(database == "GO_Biological_Process_2021.txt") %>% 
+  dplyr::filter(Count > 1) %>% 
+  unite("GenePositive":"GeneNegative", col = "GeneRatio", sep = "/")
+
+compareCluster_output <- new("compareClusterResult", 
+                               compareClusterResult = data, 
+                               geneClusters = gene_list, 
+                               fun = "enricher",
+                               .call = match.call(expand.dots = TRUE))
+
+compareCluster_output %>% clusterProfiler::dotplot()
+```
+
+
+# match to preys
+```{r}
+p_value_thresholds <- c(0.01, 0.03, 0.05)
+deg_list <- purrr::map(seq_along(stat_list), function(i) stat_list[[i]] %>% dplyr::filter(estimate > 1.5 & p.value < p_value_thresholds[i]))
+
+gene_list <- deg_list %>% purrr::map(pull, gene) %>% purrr::map(str_to_upper)
+
+preys_df <- read_delim("~/PRIMUS/data/83_BIOINFORMATICS/Kadu/protein_interactome_Goretti/preys-latest.txt", 
+                       delim = "\t", 
+                       escape_double = FALSE, 
+                       trim_ws = TRUE)
+
+bar_plot_human_cell_map <- preys_df %>% 
+  dplyr::filter(symbol %in% gene_list[[3]]) %>% 
+  group_by(`MMF localization`) %>% 
+  tally() %>% 
+  ggplot(aes(x = `MMF localization`, y = n)) +
+  geom_bar(stat = "identity", fill = "darkblue") +
+  ggeasy::easy_text_size(size = 20) +
+  ggeasy::easy_rotate_x_labels(angle = 45, side = "right") +
+  labs(y = "Number of proteins")
+
+bar_plot_human_cell_map %>% ggsave(filename = paste0(path_to_data, "barplot_human_cell_map_p_value_threshold_0.05_width_10_height_7.png"), 
+         width = 15, 
+         height = 15, 
+         dpi = 900)
+  
+  
+intersect(gene_list[[1]], preys_df$symbol)
+
+```
+
+
+# SubcellulaRVis
+```{r}
+# https://github.com/JoWatson2011/subcellularvis
+# https://www.science.org/doi/full/10.1126/science.aal3321
+
+# From https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9252817/
+library(subcellularvis)
+
+# genes <- c("MAPK1", "MAPK3")
+gene_list <- deg_list %>% purrr::map(pull, gene) %>% purrr::map(str_to_upper)
+
+# Calculate enrichment of subcellular compartment
+compartment_result_list <- gene_list %>% purrr::map(compartmentData)
+
+compartment_result_list <- purrr::map(seq_along(compartment_result_list), function(i) compartment_result_list[[i]]$enrichment %>% dplyr::filter(!Compartment %in% c("Cytoplasm", "Nucleus", "Vacuole")))
+
+compartment_barplot_list <- purrr::map(seq_along(compartment_result_list), function(i){
+  compartment_result_list[[i]]$enrichment %>% 
+  ggplot(aes(x = Compartment, y = n)) +
+  geom_bar(stat = "identity", fill = "darkblue") +
+  ggeasy::easy_text_size(size = 20) +
+  ggeasy::easy_rotate_x_labels(angle = 45, side = "right") +
+  labs(y = "Number of proteins")
+})
+
+purrr::map(seq_along(compartment_barplot_list), function(i) {
+  compartment_barplot_list[[i]] %>% 
+    ggsave(filename = paste0(path_to_data, "barplot_SubcellulaRVis_p_value_threshold_", p_value_thresholds[i], "_width_10_height_7.png"), 
+         width = 10, 
+         height = 7, 
+         dpi = 900)
+  })
+
+purrr::map(seq_along(compartment_result_list), function(i) {
+  compartment_result_list[[i]]$enrichment %>% 
+  vroom::vroom_write(file = paste0(path_to_data, "compartment_result_p_value_threshold_", p_value_thresholds[i], ".tsv"), 
+                     delim = "\t")
+  compartment_result_list[[i]]$enrichment %>% 
+    writexl::write_xlsx(path = paste0(path_to_data, "compartment_result_p_value_threshold_", p_value_thresholds[i], ".xlsx"))
+           })
+
+# Visualise subcellular enrichment
+# subcellular_enrichment_figure <- runSubcellulaRvis(compartment_result_list[[1]]$enrichment, 
+#                   colScheme_low = "lightgreen", 
+#                   colScheme_high = "darkred")
+# 
+# subcellular_enrichment_figure %>% ggsave(filename = paste0(path_to_data, "subcellular_enrichment_figure.png"), width = 7, height = 5, dpi = 900)
+
+# Use plotly for interactive visualisation
+# plotly::ggplotly(runSubcellulaRvis(compartment_results$enrichment, 
+#                                    colScheme_low = "lightblue", 
+#                                    colScheme_high = "darkred")
+#                                    )
+```
+
+
+# Statistical analysis for 20220520_Goretti.xlsx
+```{r}
+# library(broom)
+# library(rstatix)
+# 
+# df_list <- df_list %>% purrr::map(pivot_longer, cols = c("lipo_cyto", "lipo_cyto2", "tent_cyto", "tent_cyto2"), names_to = "sample", values_to = "value")
+# df_list <- df_list %>% purrr::map(mutate, group = sample %>% str_remove_all(pattern = "_.*"))
+# 
+# df_list$df_1 %>% anova_test(formula = group ~ value)
+#   
+# t_test()
+# model <- lm(group ~ value, data = df_list$df_1)
+# tidy(model)
+
+
+# Code from Vendula
+# rm(list=ls())
+# 
+# setwd("//primus.img.cas.cz/data/83_BIOINFORMATICS/Vendula_BIOINFORMATICS/Scientific projects/Goretti/STA-2023-046 CoIP")
+
+# df<-read.csv("data.csv", check.names = F)
+# df1 <- df[, c(5:11)] %>%
+#   gather(-"Alias Genes", value = "expression", key = "sample") %>%
+#   mutate(Group = str_extract(sample, "TM|TH")) %>%
+#   mutate(MIN = min(expression, na.rm = T)) %>%
+#   rowwise() %>%
+#   mutate(Exp = if_else(is.na(expression), rnorm(1, MIN, 0.2), expression)) %>%
+#   ungroup() %>%
+#   mutate(MIN = min(Exp, na.rm = T), Exp = Exp - MIN)
+# 
+# genes <- unique(df1$`Alias Genes`)
+# i <- genes[3]
+# 
+# stat <- data.frame()
+# for (i in genes) {
+#   df2 <- filter(df1, `Alias Genes` == i)
+# 
+#   a <- tidy(lm(Exp ~ Group, data = df2))
+#   a$var <- i
+# 
+#   # p<-ggplot(data=df2,aes(x=Group, y=Exp, fill=Group))+geom_boxplot(alpha=0.8,outlier.shape = NA)+geom_point(position = position_jitterdodge())+
+#   #   theme_light()+
+#   #   scale_fill_brewer( palette = "Dark2")+
+#   #   scale_color_brewer( palette = "Dark2")+
+#   #   theme(axis.text=element_text(size=12),axis.title=element_text(size=14,face="bold"),
+#   #         legend.text=element_text(size=12), legend.title = element_blank(),
+#   #         legend.position = "bottom", strip.text = element_text(size = 12,colour = "black"),
+#   #         plot.title = element_text(size=16,face="bold",hjust = 0.5))+
+#   #   labs(y="Relative Fold Change",title=i,x="",caption = paste0("Difference HA minus Myc is ",round(a[2,2],2),", p-value is ",round(a[2,5],4)))+ylim(0,NA)
+#   # print(p)
+#   #
+#   # ggsave(paste0(i,".jpg"))
+# 
+#   stat <- rbind(stat, a[2, ])
+# }
+# 
+# 
+# pval <- 0.05
+# rh <- 1.5
+# rl <- -1.5
+# 
+# avg2 <- stat %>%
+#   mutate(Group = if_else((estimate > rh | estimate < rl) & `p.value` < pval, "TM vs TH", "non significant")) %>%
+#   mutate(Labels = if_else(p.value < 0.05, var, ""), p_log = -(log(`p.value`, 10)))
+# 
+# ggplot(data = avg2, aes(x = estimate, y = p_log, col = Group)) +
+#   geom_point() +
+#   geom_label_repel(
+#     data = subset(avg2, estimate > rh & `p.value` < pval),
+#     aes(label = Labels),
+#     box.padding = 0.35, force = 10,
+#     point.padding = 0.5,
+#     arrow = arrow(length = unit(0.01, "npc"), type = "open", ends = "first"),
+#     xlim = c(rh, NA)
+#   ) +
+#   geom_label_repel(
+#     data = subset(avg2, estimate < rl & `p.value` < pval),
+#     aes(label = Labels),
+#     box.padding = 0.35, force = 10,
+#     point.padding = 0.5,
+#     arrow = arrow(length = unit(0.01, "npc"), type = "open", ends = "first"),
+#     xlim = c(NA, rl)
+#   ) +
+#   scale_colour_manual(values = c("black", "darkred", "darkgreen", "darkblue")) +
+#   theme_bw() +
+#   theme(legend.position = "bottom") +
+#   labs(x = "estimate", y = "-log10 p.value") +
+#   geom_segment(aes(x = rh, xend = 8, y = -log(pval, 10), yend = -log(pval, 10))) +
+#   geom_segment(aes(x = rh, xend = rh, y = -log(pval, 10), yend = 4)) +
+#   geom_segment(aes(x = -8, xend = rl, y = -log(pval, 10), yend = -log(pval, 10))) +
+#   geom_segment(aes(x = rl, xend = rl, y = -log(pval, 10), yend = 4))
+# 
+# ggsave(paste0(Sys.Date(), " Vulcano plot p value less than ", pval, " .jpg"))
+# write.csv(stat, "Statistics.csv")
+# 
+# df1 %>%
+#   dplyr::select(-MIN, -expression, -Group) %>%
+#   spread(key = sample, value = Exp) %>%
+#   write.csv("Raw data filled.csv")
+
+```
+
+```{r}
+# fold_change_parameter <- "TM_TH fold change"
+# fold_change_parameter <- "M_H fold change"
+
+# df_list <- df_list %>% purrr::map(mutate, `TM_TH fold change` = `TM_TH fold change` %>% as.numeric)
+# df_list <- df_list %>% purrr::map(arrange, desc(`TM_TH fold change`))
+
+# df_list <- df_list %>% purrr::map(mutate, `M_H fold change` = `M_H fold change` %>% as.numeric)
+# df_list <- df_list %>% purrr::map(arrange, desc(`M_H fold change`))
+# df_list <- df_list %>% purrr::map(dplyr::filter, `M_H fold change` != "NaN")
+
+df_list <- df_list %>% purrr::map(mutate, estimate = estimate %>% as.numeric)
+df_list <- df_list %>% purrr::map(arrange, desc(estimate))
+df_list <- df_list %>% purrr::map(dplyr::filter, estimate != "NaN")
+```
+
+# For 20230714_Goretti_1372.xlsx
+```{r}
+gene_list <- df_list %>% 
+  purrr::map(function(x) x %>% 
+               arrange(desc(as.numeric(`TM_TH fold change`))) %>% 
+               distinct(`Gene names`, .keep_all = TRUE) %>% 
+               mutate(rank = rank(`TM_TH fold change`, ties.method = "random"), 
+                      gene = `Gene names` %>% str_to_upper) %>% 
+               arrange(desc(rank)) %>% 
+               dplyr::select(`Gene names`, `TM_TH fold change`)
+  )
+
+gene_list <- gene_list %>% purrr::map(separate, `Gene names`, into = c("gene", "gene_2"), sep = ";")
+
+gene_list <- gene_list %>% purrr::map(dplyr::select, c("gene", `TM_TH fold change`))
+
+gene_list <- gene_list %>% purrr::map(na.omit)
+
+gene_list <- gene_list %>% purrr::map(mutate, gene = gene %>% toupper())
+
+ranked_gene_list <- purrr::map(seq_along(gene_list), function(i) gene_list[[i]] %>% 
+  pull(as.numeric(`TM_TH fold change`)) %>%
+  purrr::set_names(gene_list[[i]]$gene)) %>%
+  purrr::set_names(names(df_list))
+```
+
+# For 20230828_Goretti_1391-900.xlsx
+```{r}
+gene_list <- df_list %>% 
+  purrr::map(function(x) x %>% 
+               arrange(desc(as.numeric(`M_H fold change`))) %>% 
+               distinct(`Gene names`, .keep_all = TRUE) %>% 
+               mutate(rank = rank(`M_H fold change`, ties.method = "random"), 
+                      gene = `Gene names` %>% str_to_upper) %>% 
+               arrange(desc(rank)) %>% 
+               dplyr::select(`Gene names`, `M_H fold change`)
+  )
+
+gene_list <- gene_list %>% purrr::map(dplyr::filter, `M_H fold change` != "NaN")
+
+gene_list <- gene_list %>% purrr::map(separate, `Gene names`, into = c("gene", "gene_2"), sep = ";")
+
+gene_list <- gene_list %>% purrr::map(dplyr::select, c("gene", `M_H fold change`))
+
+gene_list <- gene_list %>% purrr::map(na.omit)
+
+gene_list <- gene_list %>% purrr::map(mutate, gene = gene %>% toupper())
+
+gene_list <- gene_list %>% purrr::map(mutate, gene = gene %>% dplyr::recode(FAM46A = "TENT5A"))
+
+ranked_gene_list <- purrr::map(seq_along(gene_list), function(i) gene_list[[i]] %>% 
+  pull(as.numeric(`M_H fold change`)) %>%
+  purrr::set_names(gene_list[[i]]$gene)) %>%
+  purrr::set_names(names(df_list))
+```
+
+# For 2023-10-06 Statistics noise bellow 18.csv
+```{r}
+df_list <- df_list %>% purrr::map(mutate, p_adjust = p.value %>% p.adjust())
+
+gene_list <- df_list %>% 
+  purrr::map(function(x) x %>% 
+               arrange(desc(as.numeric(estimate))) %>% 
+               distinct(var, .keep_all = TRUE) %>% 
+               mutate(rank = rank(estimate, ties.method = "random"), 
+                      gene = var %>% str_to_upper) %>% 
+               arrange(desc(rank)) %>% 
+               dplyr::select(var, estimate, p.value)
+  )
+
+gene_list <- gene_list %>% purrr::map(dplyr::filter, estimate != "NaN")
+
+gene_list <- gene_list %>% purrr::map(separate, var, into = c("gene", "gene_2"), sep = ";")
+
+gene_list <- gene_list %>% purrr::map(dplyr::select, c("gene", estimate, p.value))
+
+gene_list <- gene_list %>% purrr::map(na.omit)
+
+gene_list <- gene_list %>% purrr::map(mutate, gene = gene %>% toupper())
+
+gene_list <- gene_list %>% purrr::map(mutate, gene = gene %>% dplyr::recode(FAM46A = "TENT5A"))
+
+ranked_gene_list <- purrr::map(seq_along(gene_list), function(i) gene_list[[i]] %>% 
+  pull(as.numeric(estimate)) %>%
+  purrr::set_names(gene_list[[i]]$gene)) %>%
+  purrr::set_names(names(df_list))
+```
+
+# ORA and GSEA custom functions
+```{r}
+ora_analysis <- function(genes_list, database = KEGG_2019_Human, pvalue_cutoff = 1, qvalue_cutoff = 1, p.adjust_cutoff = 0.1, count_at_least = 3) {
+  
+  # Load required packages
+  library(clusterProfiler)
+  library(tidyverse)
+  
+  # Read the GMT file into a data frame
+  gmt_df <- database %>% clusterProfiler::read.gmt()
+  
+  # Extract the gene sets (terms) from the GMT data frame
+  terms_list <- gmt_df %>%
+    split(f = .$term) %>%
+    purrr::map(pull, gene)
+  
+  # Get the unique set of genes present in the database
+  genes_set <- gmt_df[, "gene"] %>% unique()
+  
+  # Perform enrichment analysis for each gene set in the genes_list
+  enrichment_result <- genes_list %>%
+    purrr::map(clusterProfiler::enricher, pvalueCutoff = pvalue_cutoff, qvalueCutoff = qvalue_cutoff, universe = genes_set, TERM2GENE = gmt_df)
+  
+  # Combine the enrichment results into a single data frame
+  cl_prof_df <- enrichment_result %>%
+    purrr::map(as.data.frame) %>%
+    bind_rows(.id = "Cluster")
+  
+  # Filter the results based on p.adjust and count criteria
+  cl_prof_df <- cl_prof_df %>% dplyr::filter(p.adjust < p.adjust_cutoff & Count >= count_at_least)
+  
+  # Store the input gene clusters
+  geneClusters <- genes_list
+  
+  # Create a result object of class "compareClusterResult"
+  compareCluster_output <- new("compareClusterResult",
+    compareClusterResult = cl_prof_df,
+    geneClusters = list(geneClusters),
+    fun = "enricher",
+    .call = match.call(expand.dots = TRUE)
+  )
+  
+  # Return the result object
+  return(compareCluster_output)
+}
+
+shape_data <- function(ora_results_output) {
+  ora_results_output@compareClusterResult <- ora_results_output@compareClusterResult %>%
+    mutate_at(.vars = c("pvalue", "p.adjust", "qvalue"), .funs = formatC, digits = 2, format = "e")
+  return(ora_results_output)
+}
+
+gsea_analysis <- function(database = KEGG_2019_Mouse, sorted_genes, p_value_cutoff = 0.05, p_adjust_cutoff = 0.05, min_size = 10, max_size = 500, p_adjust_method = "BH") {
+  
+  # Load required packages
+  library(clusterProfiler)
+  library(tidyverse)
+
+  # Read the GMT file into a data frame
+  gmt_df <- database %>% clusterProfiler::read.gmt()
+
+  # Extract the gene sets (terms) from the GMT data frame
+  gmt_list <- gmt_df %>%
+    split(f = .$term) %>%
+    purrr::map(pull, gene)
+
+   # Perform Gene Set Enrichment Analysis (GSEA) using the sorted_genes and the database
+  gsea_result <- clusterProfiler::GSEA(
+    geneList = sorted_genes, 
+    TERM2GENE = gmt_df, 
+    verbose = FALSE, 
+    minGSSize = min_size, 
+    maxGSSize = max_size, 
+    pvalueCutoff = p_value_cutoff, 
+    pAdjustMethod = p_adjust_method
+    ) %>% suppressWarnings()
+
+  # Generate enrichment plots for each gene set and store them in a list
+  gseaplot_results <- purrr::map(gsea_result@result$Description, function(i) {
+    enrichplot::gseaplot2(
+      x = gsea_result,
+      geneSetID = i,
+      title = gsea_result@result$Description[i]
+    )
+  }) %>% purrr::set_names(gsea_result@result$Description)
+
+  # Store the GSEA results and the enrichment plot results in a list
+  results <- list(
+    gsea_results = gsea_result,
+    gseaplot_results = gseaplot_results
+  )
+
+  # Return the results
+  return(results)
+}
+
+
+  # fgsea_result_gseaResult <- new("gseaResult", 
+  #                              result = fgsea_result, # GSEA anaysis
+  #                              organism = "mmu", # organism
+  #                              setType = "KEGG", # setType
+  #                              geneSets = gmt_list, # geneSets
+  #                              geneList = sorted_genes, # order rank geneList
+  #                              keytype = "mgi_symbol", # ID type of gene
+  #                              permScores = matrix(0, 1, 2), # permutation scores
+  #                              params = list(pvalueCutoff = p_adjust_cutoff, # parameters
+  #                                           eps = 0,
+  #                                           pAdjustMethod ="BH",
+  #                                           exponent = 1,
+  #                                           minGSSize = 10,
+  #                                           maxGSSize = 500
+  #                                           ),
+  #                              gene2Symbol = "0", # gene ID to Symbol
+  #                              readable = FALSE, # whether convert gene ID to symbol
+  #                              termsim = matrix(0, 1, 2),
+  #                              method = "0",
+  #                              dr = list() # dimension reduction result
+  #                              )
+
+```
+
+# Databases
+```{r}
+path_to_pathways <- "~/Dropbox/GMT/"
+# path_to_pathways <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/GMT/"
+# path_to_pathways <- "C:\\Users\\Carlos\\Dropbox\\GMT\\"
+WikiPathways_2019_Human <- path_to_pathways %>% paste0("WikiPathways_2019_Human.txt") # WikiPathways_2019_Human gene sets
+WikiPathways_2019_Mouse <- path_to_pathways %>% paste0("WikiPathways_2019_Mouse.txt") # WikiPathways_2019_Mouse gene sets
+KEGG_2019_Human <- path_to_pathways %>% paste0("KEGG_2019_Human.txt") # KEGG_2019_Human gene sets
+KEGG_2019_Mouse <- path_to_pathways %>% paste0("KEGG_2019_Mouse.txt") # KEGG_2019_Mouse gene sets
+LINCS_L1000_Chem_Pert_down <- path_to_pathways %>% paste0("LINCS_L1000_Chem_Pert_down.txt") # LINCS_L1000_Chem_Pert_down gene sets
+LINCS_L1000_Chem_Pert_up <- path_to_pathways %>% paste0("LINCS_L1000_Chem_Pert_up.txt") # LINCS_L1000_Chem_Pert_up gene sets
+Reactome_2016 <- path_to_pathways %>% paste0("Reactome_2016.txt") # Reactome_2016 gene sets
+GO_Molecular_Function_2018 <- path_to_pathways %>% paste0("GO_Molecular_Function_2018.txt") # GO_Molecular_Function_2018 gene sets
+GO_Cellular_Component_2018 <- path_to_pathways %>% paste0("GO_Cellular_Component_2018.txt") # GO_Cellular_Component_2018 gene sets
+GO_Biological_Process_2018 <- path_to_pathways %>% paste0("GO_Biological_Process_2018.txt") # GO_Biological_Process_2018 gene sets
+GO_Molecular_Function_2021 <- path_to_pathways %>% paste0("GO_Molecular_Function_2021.txt") # GO_Molecular_Function_2021 gene sets
+GO_Cellular_Component_2021 <- path_to_pathways %>% paste0("GO_Cellular_Component_2021.txt") # GO_Cellular_Component_2021 gene sets
+GO_Biological_Process_2021 <- path_to_pathways %>% paste0("GO_Biological_Process_2021.txt") # GO_Biological_Process_2021 gene sets
+GO_Molecular_Function_2023 <- path_to_pathways %>% paste0("GO_Molecular_Function_2023.txt") # GO_Molecular_Function_2023 gene sets
+GO_Cellular_Component_2023 <- path_to_pathways %>% paste0("GO_Cellular_Component_2023.txt") # GO_Cellular_Component_2023 gene sets
+GO_Biological_Process_2023 <- path_to_pathways %>% paste0("GO_Biological_Process_2023.txt") # GO_Biological_Process_2023 gene sets
+BioPlanet_2019 <- path_to_pathways %>% paste0("BioPlanet_2019.txt") # BioPlanet_2019 gene sets
+# BioPlanet_pathways<- "~/Dropbox/GMT/BioPlanet_pathways.csv" # BioPlanet_pathways gene sets
+C6_Oncogenic_Signatures <- path_to_pathways %>% paste0("c6.all.v2023.1.Hs.symbols.gmt")
+```
+
+
+```{r}
+gsea_KEGG_results_list <- purrr::map(seq_along(ranked_gene_list), function(i) gsea_analysis(database = KEGG_2019_Mouse, sorted_genes = ranked_gene_list[[i]], p_value_cutoff = 0.05, p_adjust_cutoff = 0.05, min_size = 10, max_size = 500, p_adjust_method = "BH")) %>% purrr::set_names(names(df_list))
+
+for (i in seq_along(gsea_KEGG_results_list)) {
+  for (j in seq_along(gsea_KEGG_results_list[[i]]$gsea_results@result$Description)) {
+    print(i)
+    print(j)
+    gsea_plot <- enrichplot::gseaplot2(
+      x = gsea_KEGG_results_list[[i]]$gsea_results,
+      geneSetID = j,
+      title = gsea_KEGG_results_list[[i]]$gsea_results@result$Description[j]
+    )
+    aplot::plot_list(gglist = gsea_plot, ncol = 1, heights = c(1.5, 0.5, 1)) %>%
+      aplot::ggsave(filename = paste0(
+        path_to_data, "GSEA_results/",
+        names(gsea_KEGG_results_list)[[i]], "_",
+        gsea_KEGG_results_list[[i]]$gsea_results@result$Description[j], ".png"
+        ), 
+        device = "png", width = 7, height = 5, dpi = 900)
+  }
+}
+
+```
+
+
+# Prepare data for https://cell-map.org/query
+```{r}
+input_df_to_cell_map <- df_list$df_1 %>% 
+  dplyr::rename("-log p_value" = "-Log Student's T-test p-value TM_TH") %>% 
+  dplyr::rename("fold_change" = "TM_TH fold change") %>% 
+  separate(`Gene names`, into = c("Prey", "gene_2"), sep = ";") %>% 
+  mutate(Prey = Prey %>% str_to_upper()) %>% 
+  mutate_at(.vars = "-log p_value", .funs = as.numeric) %>% 
+  mutate(p_value = 10^(-1*`-log p_value`)) %>% 
+  mutate(FDR = p_value %>% p.adjust(method = "BH")) %>% 
+  mutate(Bait = rep("Tent5a_Myc", nrow(.))) %>% 
+  dplyr::select(Bait, Prey, fold_change, FDR) %>% 
+  purrr::set_names("Bait", "Prey", "Value", "FDR") %>% 
+  na.omit()
+
+input_df_to_cell_map <- df_list$df_1 %>% 
+  # dplyr::rename("-log p_value" = "-Log Student's T-test p-value TM_TH") %>% 
+  # dplyr::rename("fold_change" = "TM_TH fold change") %>% 
+  separate(`Gene names`, into = c("Prey", "gene_2"), sep = ";") %>% 
+  mutate(Prey = Prey %>% str_to_upper()) %>% 
+  mutate_at(.vars = c("Q-value", "Score"), .funs = as.numeric) %>%
+  # mutate(p_value = 10^(-1*`-log p_value`)) %>% 
+  # mutate(FDR = p_value %>% p.adjust(method = "BH")) %>% 
+  mutate(Bait = rep("Tent5a_Myc", nrow(.))) %>% 
+  dplyr::select(Bait, Prey, Score, `Q-value`) %>% 
+  purrr::set_names("Bait", "Prey", "Value", "FDR") %>% 
+  na.omit()
+  
+input_df_to_cell_map %>% vroom::vroom_write(file = paste0(path_to_data, "input_df_to_cell_map.tsv"), delim = "\t")  
+  
+input_df_to_cell_map %>% dplyr::filter(FDR < 0.01)  
+```
+
+# SubcellulaRVis
+```{r}
+# https://github.com/JoWatson2011/subcellularvis
+# https://www.science.org/doi/full/10.1126/science.aal3321
+
+deg_list <- df_list %>% purrr::map(dplyr::filter, estimate > 1 & p.value < 0.05)
+
+GO_CC_ora_results <- ora_analysis(genes_list = list(deg_list$df_1$var), database = GO_Cellular_Component_2021)
+
+
+# From https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9252817/
+library(subcellularvis)
+
+# genes <- c("MAPK1", "MAPK3")
+genes <- gene_list$df_1$var
+
+# Calculate enrichment of subcellular compartment
+# compartment_results <- compartmentData(genes = genes, organism = "Mouse")
+# compartment_results <- compartmentData(genes = genes, organism = "Human")
+compartment_results <- compartmentData(genes = genes)
+
+compartment_results$enrichment %>% vroom::vroom_write(file = paste0(path_to_data, "compartment_results.tsv"), delim = "\t")
+compartment_results$enrichment %>% writexl::write_xlsx(path = paste0(path_to_data, "compartment_results.xlsx"))
+
+# Visualise subcellular enrichment
+subcellular_enrichment_figure <- runSubcellulaRvis(compartment_results$enrichment, 
+                  colScheme_low = "lightgreen", 
+                  colScheme_high = "darkred")
+
+subcellular_enrichment_figure %>% ggsave(filename = paste0(path_to_data, "subcellular_enrichment_figure.png"), width = 7, height = 5, dpi = 900)
+
+# subcellular_enrichment_figure_mouse <- runSubcellulaRvis(compartment_results$enrichment, 
+#                   colScheme_low = "lightgreen", 
+#                   colScheme_high = "darkred")
+
+# subcellular_enrichment_figure_mouse %>% ggsave(filename = paste0(path_to_data, "subcellular_enrichment_figure_mouse.png"), width = 7, height = 5, dpi = 900)
+
+# Use plotly for interactive visualisation
+plotly::ggplotly(runSubcellulaRvis(compartment_results$enrichment, 
+                                   colScheme_low = "lightblue", 
+                                   colScheme_high = "darkred")
+                                   )
+```
+
+
+
+
+
+

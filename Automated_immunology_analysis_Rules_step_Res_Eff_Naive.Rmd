@@ -1,0 +1,3190 @@
+---
+title: "Automated_immunology_analysis_Rules_step_3"
+author: "Carlos Eduardo Madureira Trufen"
+date: "8/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r, message=FALSE, warning=FALSE}
+library(bestNormalize, warn.conflicts = FALSE)
+library(C50, warn.conflicts = FALSE)
+library(caret, warn.conflicts = FALSE)
+library(corrplot, warn.conflicts = FALSE)
+library(Ckmeans.1d.dp, warn.conflicts = FALSE)
+library(clusterCrit, warn.conflicts = FALSE)
+library(CytoML, warn.conflicts = FALSE)
+library(DiffSOM, warn.conflicts = FALSE)
+library(doParallel, warn.conflicts = FALSE)
+library(EmbedSOM, warn.conflicts = FALSE)
+library(FactoMineR, warn.conflicts = FALSE)
+library(factoextra, warn.conflicts = FALSE)
+library(flowClean, warn.conflicts = FALSE)
+library(flowCore, warn.conflicts = FALSE)
+library(flowClust, warn.conflicts = FALSE)
+library(flowStats, warn.conflicts = FALSE)
+library(flowViz, warn.conflicts = FALSE)
+library(flowWorkspace, warn.conflicts = FALSE)
+library(FlowSOM, warn.conflicts = FALSE)
+library(furrr, warn.conflicts = FALSE)
+library(ggcyto, warn.conflicts = FALSE)
+library(HDclassif, warn.conflicts = FALSE)
+library(imbalance, warn.conflicts = FALSE)
+library(kohonen, warn.conflicts = FALSE)
+library(microbenchmark, warn.conflicts = FALSE)
+library(parallel, warn.conflicts = FALSE)
+library(parallelMap, warn.conflicts = FALSE)
+library(profvis, warn.conflicts = FALSE)
+library(RColorBrewer, warn.conflicts = FALSE)
+library(Rcpp11, warn.conflicts = FALSE)
+library(ROSE, warn.conflicts = FALSE)
+library(tictoc, warn.conflicts = FALSE)
+library(tidyverse, warn.conflicts = FALSE)
+library(xgboost, warn.conflicts = FALSE)
+library(yasomi, warn.conflicts = FALSE)
+
+# source("~/PRIMUS/home/trufenc/new_SOM_functions.R")
+# source("/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=home/trufenc/new_SOM_functions.R")
+
+# source_path <- "~/PRIMUS/"
+source_path <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share="
+
+source(paste0(source_path, "home/trufenc/new_SOM_functions.R"))
+```
+
+```{r}
+scale_to_range_0_1 <- function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+```
+
+```{r add_first_gate_column}
+add_first_gate_column <- function(facs_data_df) {
+  facs_data_df <- facs_data_df %>%
+    mutate(first_gate = case_when(!(cell_type %in% c("clog+", "cells-", "S1-", "S2-", "dead")) ~ "live"))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+  return(facs_data_df)
+}
+```
+
+```{r add_second_gate_column}
+add_second_gate_column <- function(facs_data_df) {
+
+  facs_data_df <- facs_data_df %>%
+    mutate(second_gate = if_else(first_gate %>% str_detect(pattern = "not_live"), true = "not_live", false = as.character(cell_type)))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(second_gate = if_else(second_gate %in% c("CD5+-", "DN "), true = "Not_Panel_A_cell_types", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "gdTCR"), true = "gdTCR_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "NK_"), true = "NK_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD4\\-NKT_"), true = "CD4-NKT_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD4\\+NKT_"), true = "CD4+NKT_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "Tregs_"), true = "Tregs_CD4+_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "Th_"), true = "Th_CD4+_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD8"), true = "CD8+_cells", false = second_gate))
+
+  return(facs_data_df)
+}
+```
+
+```{r add_third_gate_column}
+add_third_gate_column <- function(facs_data_df) {
+
+  facs_data_df <- facs_data_df %>%
+    mutate(third_gate = if_else(first_gate %>% str_detect(pattern = "not_live"), true = "not_live", false = as.character(cell_type)))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(third_gate = if_else(second_gate %>% str_detect(pattern = "Not_Panel_A_cell_types"), true = "Not_Panel_A_cell_types", false = third_gate))
+  
+    facs_data_df <- facs_data_df %>%
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "_neg_"), true = "Neg", false = third_gate))
+  
+  facs_data_df <- facs_data_df %>%
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Eff_Klrg1\\-"), true = "Eff_Klrg1_neg", false = third_gate)) %>% 
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Eff_Klrg1\\+"), true = "Eff_Klrg1_pos", false = third_gate)) %>% 
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Res_Klrg1\\-"), true = "Res_Klrg1_neg", false = third_gate)) %>% 
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Res_Klrg1\\+"), true = "Res_Klrg1_pos", false = third_gate)) %>% 
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Naive_Klrg1\\-"), true = "Naive_Klrg1_neg", false = third_gate)) %>% 
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Naive_Klrg1\\+"), true = "Naive_Klrg1_pos", false = third_gate)) 
+  
+  return(facs_data_df)
+}
+```
+
+```{r add_third_gate_column}
+add_Res_Eff_Naive_gate_column <- function(facs_data_df) {
+
+  facs_data_df <- facs_data_df %>%
+    mutate(Res_Eff_Naive_gate = if_else(first_gate %>% str_detect(pattern = "not_live"), true = "not_live", false = as.character(cell_type)))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(Res_Eff_Naive_gate = if_else(second_gate %>% str_detect(pattern = "Not_Panel_A_cell_types"), true = "Not_Panel_A_cell_types", false = Res_Eff_Naive_gate))
+  
+    facs_data_df <- facs_data_df %>%
+    mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %>% str_detect(pattern = "_neg_"), true = "Neg", false = Res_Eff_Naive_gate))
+  
+  facs_data_df <- facs_data_df %>%
+    mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %>% str_detect(pattern = "Eff_"), true = "Eff", false = Res_Eff_Naive_gate)) %>% 
+    mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %>% str_detect(pattern = "Res_"), true = "Res", false = Res_Eff_Naive_gate)) %>% 
+    mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %>% str_detect(pattern = "Naive_"), true = "Naive", false = Res_Eff_Naive_gate))
+  
+  return(facs_data_df)
+}
+```
+
+```{r add_third_gate_column}
+add_Klrg1_gate_column <- function(facs_data_df) {
+
+  facs_data_df <- facs_data_df %>%
+    mutate(Klrg1_gate = if_else(first_gate %>% str_detect(pattern = "not_live"), true = "not_live", false = as.character(cell_type)))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(Klrg1_gate = if_else(second_gate %>% str_detect(pattern = "Not_Panel_A_cell_types"), true = "Not_Panel_A_cell_types", false = Klrg1_gate))
+  
+    facs_data_df <- facs_data_df %>%
+    mutate(Klrg1_gate = if_else(Klrg1_gate %>% str_detect(pattern = "_neg_"), true = "Neg", false = Klrg1_gate))
+  
+  facs_data_df <- facs_data_df %>%
+    mutate(Klrg1_gate = if_else(Klrg1_gate %>% str_detect(pattern = "Klrg1\\-"), true = "Klrg1_neg", false = Klrg1_gate)) %>% 
+    mutate(Klrg1_gate = if_else(Klrg1_gate %>% str_detect(pattern = "Klrg1\\+"), true = "Klrg1_pos", false = Klrg1_gate)) 
+  
+  return(facs_data_df)
+}
+```
+
+path to files
+```{r path_to_files}
+path_to_files <- paste0(source_path, "~/data/83_BIOINFORMATICS/Carlos")
+```
+
+
+```{r panel_A_classes}
+panel_A_classes <- c(
+  "CD4\\-NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells.fcs",
+  "clog\\-_cells\\-.fcs",
+  "clog\\-\\-.fcs",
+  "dead.fcs",
+  "DN .fcs",
+  "CD5\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+.fcs",
+  "gd_neg_Klrg1\\+\\-.fcs",
+  "gd_neg_Klrg1\\+.fcs",
+  "gd_Res_Klrg1\\+\\-.fcs",
+  "gd_Res_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\+\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\+\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "S1\\-.fcs",
+  "S2\\-.fcs",
+  "Th_Eff_Klrg1\\+\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\+\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\+\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Treg_Eff_Klrg1\\+\\-.fcs",
+  "Treg_Eff_Klrg1\\+.fcs",
+  "Treg_neg_Klrg1\\+\\-.fcs",
+  "Treg_neg_Klrg1\\+.fcs",
+  "Treg_Res_Klrg1\\+\\-.fcs",
+  "Treg_Res_Klrg1\\+.fcs"
+)
+
+```
+
+
+```{r build_fcs_data_df}
+build_fcs_data_df <- function(cell_types, diff_som) {
+  
+  cell_types_df <- cell_types %>%
+    as.data.frame() %>%
+    # rownames_to_column() %>%
+    # dplyr::rename("cell_types" = ".", "File" = "rowname") %>%
+    dplyr::rename("cell_types" = ".")
+    # mutate(File = File %>% as.numeric())
+
+  cell_types_df <- cell_types_df %>%
+    mutate(cell_types = cell_types %>% recode(
+      "clog--" = "clog+",
+      "clog-_cells-" = "cells-",
+      "cells_S1-" = "S1-",
+      "S2_dead" = "dead",
+      "S1_S2-" = "S2-",
+      "NK_Eff_Klrg1+-" = "NK_Eff_Klrg1-",
+      "NK_Res_Klrg1+-" = "NK_Res_Klrg1-",
+      "NK_neg_Klrg1+-" = "NK_neg_Klrg1-",
+      "gd_Eff_Klrg1+" = "gdTCR_Eff_Klrg1+",
+      "gd_Eff_Klrg1+-" = "gdTCR_Eff_Klrg1-",
+      "gd_Res_Klrg1+" = "gdTCR_Res_Klrg1+",
+      "gd_Res_Klrg1+-" = "gdTCR_Res_Klrg1-",
+      "gd_neg_Klrg1+" = "gdTCR_neg_Klrg1+",
+      "gd_neg_Klrg1+-" = "gdTCR_neg_Klrg1-",
+      "CD4-NKT_Eff_Klrg1+-" = "CD4-NKT_Eff_Klrg1-",
+      "CD4-NKT_Res_Klrg1+-" = "CD4-NKT_Res_Klrg1-",
+      "CD4-NKT_neg_Klrg1+-" = "CD4-NKT_neg_Klrg1-",
+      "CD4+NKT_Eff_Klrg1+-" = "CD4+NKT_Eff_Klrg1-",
+      "CD4+NKT_Res_Klrg1+-" = "CD4+NKT_Res_Klrg1-",
+      "CD4+NKT_neg_Klrg1+-" = "CD4+NKT_neg_Klrg1-",
+      "Th_Eff_Klrg1+-" = "Th_Eff_Klrg1-",
+      "Th_Res_Klrg1+-" = "Th_Res_Klrg1-",
+      "Th_neg_Klrg1+-" = "Th_neg_Klrg1-",
+      "Treg_Eff_Klrg1+-" = "Tregs_Eff_Klrg1-",
+      "Treg_Res_Klrg1+-" = "Tregs_Res_Klrg1-",
+      "Treg_neg_Klrg1+-" = "Tregs_neg_Klrg1-",
+      "Treg_Eff_Klrg1+" = "Tregs_Eff_Klrg1+",
+      "Treg_Res_Klrg1+" = "Tregs_Res_Klrg1+",
+      "Treg_neg_Klrg1+" = "Tregs_neg_Klrg1+",
+      "CD8_Naive_Klrg1-_VM Tcells" = "CD8_Naive_Klrg1-_VM Tcells+",
+      "CD8_Naive_Klrg1+_VM Tcells" = "CD8_Naive_Klrg1+_VM Tcells+",
+      "CD8_Eff_Klrg1-_VM Tcells" = "CD8_Eff_Klrg1-_VM Tcells+",
+      "CD8_Eff_Klrg1+_VM Tcells" = "CD8_Eff_Klrg1+_VM Tcells+",
+      "CD8_Res_Klrg1-_VM Tcells" = "CD8_Res_Klrg1-_VM Tcells+",
+      "CD8_Res_Klrg1+_VM Tcells" = "CD8_Res_Klrg1+_VM Tcells+",
+      "CD8_neg_Klrg1-_VM Tcells" = "CD8_neg_Klrg1-_VM Tcells+",
+      "CD8_neg_Klrg1+_VM Tcells" = "CD8_neg_Klrg1+_VM Tcells+",
+      "CD8+_Eff_Klrg1-_VM Tcells-" = "CD8_Eff_Klrg1-_VM Tcells-",
+      "CD8+_Eff_Klrg1+_VM Tcells" = "CD8_Eff_Klrg1+_VM Tcells+",
+      "CD8+_Eff_Klrg1+_VM Tcells-" = "CD8_Eff_Klrg1+_VM Tcells-",
+      "CD8+_Naive_Klrg1-_VM Tcells" = "CD8_Naive_Klrg1-_VM Tcells+",
+      "CD8+_Naive_Klrg1-_VM Tcells-" = "CD8_Naive_Klrg1-_VM Tcells-",
+      "CD8+_Naive_Klrg1+_VM Tcells" = "CD8_Naive_Klrg1+_VM Tcells+",
+      "CD8+_Naive_Klrg1+_VM Tcells-" = "CD8_Naive_Klrg1+_VM Tcells-",
+      "CD8+_neg_Klrg1-_VM Tcells" = "CD8_neg_Klrg1-_VM Tcells+",
+      "CD8+_neg_Klrg1-_VM Tcells-" = "CD8_neg_Klrg1-_VM Tcells-",
+      "CD8+_neg_Klrg1+_VM Tcells" = "CD8_neg_Klrg1+_VM Tcells+",
+      "CD8+_neg_Klrg1+_VM Tcells-" = "CD8_neg_Klrg1+_VM Tcells-",
+      "CD8+_Res_Klrg1-_VM Tcells" = "CD8_Res_Klrg1-_VM Tcells+",
+      "CD8+_Res_Klrg1-_VM Tcells-" = "CD8_Res_Klrg1-_VM Tcells-",
+      "CD8+_Res_Klrg1+_VM Tcells" = "CD8_Res_Klrg1+_VM Tcells+",
+      "CD8+_Res_Klrg1+_VM Tcells-" = "CD8_Res_Klrg1+_VM Tcells-"
+    ))
+
+  # manual_gating <- diff_som$fs$data %>%
+  #   as.data.frame() %>%
+  #   full_join(cell_types_df) %>%
+  #   na.omit() %>%
+  #   dplyr::select(cell_types) %>%
+  #   unlist() %>%
+  #   as.character() %>%
+  #   factor()
+  
+    facs_data_df <- diff_som$fs$data %>%
+    as.data.frame() %>%
+    mutate(cell_type = cell_types_df$cell_types)
+
+  # facs_data_df <- diff_som$fs$data %>%
+  #   as.data.frame() %>%
+  #   dplyr::select(c(1:19))
+  # facs_data_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(to_transform)
+
+  facs_data_df <- facs_data_df %>%
+    purrr::set_names(str_remove(string = names(facs_data_df), pattern = "FJComp."))
+
+  # facs_data_df <- facs_data_df %>%
+  #   mutate(cell_type = manual_gating)
+  
+  return(facs_data_df)
+}
+```
+
+path to files
+```{r path_to_files}
+path_to_files <- paste0(source_path, "~/data/83_BIOINFORMATICS/Carlos")
+```
+
+# https://stackoverflow.com/questions/12119019/select-multiple-elements-from-a-list
+```{r diff_som}
+path_to_files <- list(
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02672_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02676_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02677_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02678_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02679_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02683_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02684_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0684_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0702_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0704_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0721_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0722_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0723_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0724_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0725_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0763_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0764_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0772_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0784_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0787_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0799_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0800_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0801_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0802_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0804_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03540_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03541_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03542_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03564_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_tgF3920_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_tgF3927_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_tgF3930_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_tgF3931_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_tgF3941_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_tgF3975_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_tgF4011_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_tgF4015_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3895_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3897_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3898_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3900_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3915_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3919_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3924_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3929_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3962_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3964_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3965_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3968_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3972_fcs"),  
+  # paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3974_fcs"),  
+  # paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF4006_fcs"),  
+  # paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF4021_fcs"),  
+  # paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF4022_fcs"),  
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02020_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02027_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02042_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02043_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02044_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02045_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02046_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02055_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02056_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02057_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3825_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3826_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3832_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3834_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3836_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3837_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3844_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3855_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3856_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3857_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3858_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3860_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3862_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3880_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3885_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3887_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3888_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3889_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3890_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3891_fcs"),
+  # paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3892_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3893_fcs")
+)
+
+files <- path_to_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+
+file_names <- path_to_files %>% purrr::map(list.files, pattern = ".fcs")
+
+indices_list <- purrr::map(seq_along(files), function(j) purrr::map(seq_along(panel_A_classes), function(i) files[[j]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist())
+files_to_load_list <- purrr::map(seq_along(files), function(j) files[[j]][indices_list[[j]]])
+files_to_load_names_list <- purrr::map(seq_along(files), function(j) file_names[[j]][indices_list[[j]]])
+
+files_to_load_list <- purrr::map(seq_along(files_to_load_list), function(i) files_to_load_list[[i]][-c(22, 24)])
+files_to_load_names_list <- purrr::map(seq_along(files_to_load_names_list), function(i) files_to_load_names_list[[i]][-c(22, 24)])
+
+tic()
+diff_som_01 <- files_to_load_list[c(1:10)] %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+tic()
+diff_som_02 <- files_to_load_list[c(11:20)] %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+tic()
+diff_som_03 <- files_to_load_list[c(21:30)] %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+tic()
+diff_som_04 <- files_to_load_list[c(31:40)] %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+tic()
+diff_som_05 <- files_to_load_list[c(41:50)] %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+tic()
+diff_som_06 <- files_to_load_list[c(51:60)] %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+tic()
+diff_som_07 <- files_to_load_list[c(61:70)] %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+diff_som_01 %>% saveRDS(paste0(source_path, "home/tufenc/diff_som_01_2020_11_13.rds"))
+diff_som_02 %>% saveRDS(paste0(source_path, "home/tufenc/diff_som_02_2020_11_13.rds"))
+diff_som_03 %>% saveRDS(paste0(source_path, "home/tufenc/diff_som_03_2020_11_13.rds"))
+diff_som_04 %>% saveRDS(paste0(source_path, "home/tufenc/diff_som_04_2020_11_13.rds"))
+diff_som_05 %>% saveRDS(paste0(source_path, "home/tufenc/diff_som_05_2020_11_13.rds"))
+diff_som_06 %>% saveRDS(paste0(source_path, "home/tufenc/diff_som_06_2020_11_13.rds"))
+diff_som_07 %>% saveRDS(paste0(source_path, "home/tufenc/diff_som_07_2020_11_13.rds"))
+# diff_som <- readRDS(paste0(source_path, "home/tufenc/huge_ds_2020_11_13.rds"))
+```
+
+
+```{r val_diff_som}
+path_to_val_files <- list(
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02684_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0801_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0802_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_tgF0804_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03564_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3972_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF3974_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF4006_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF4021_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_TgF4022_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02056_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02057_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3889_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3890_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3891_fcs"),
+  paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_TgF3892_fcs")
+)
+
+val_files <- path_to_val_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+
+val_file_names <- path_to_val_files %>% purrr::map(list.files, pattern = ".fcs")
+
+val_indices_list <- purrr::map(seq_along(val_files), function(j) purrr::map(seq_along(panel_A_classes), function(i) val_files[[j]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist())
+val_files_to_load_list <- purrr::map(seq_along(val_files), function(j) val_files[[j]][val_indices_list[[j]]])
+val_files_to_load_names_list <- purrr::map(seq_along(val_files), function(j) val_file_names[[j]][val_indices_list[[j]]])
+
+val_files_to_load_list <- purrr::map(seq_along(val_files_to_load_list), function(i) val_files_to_load_list[[i]][-c(22)])
+val_files_to_load_names_list <- purrr::map(seq_along(val_files_to_load_names_list), function(i) val_files_to_load_names_list[[i]][-c(22)])
+
+tic()
+val_diff_som <- val_files_to_load_list %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+# diff_som %>% saveRDS(paste0(source_path, "home/tufenc/huge_val_ds_2020_11_13.rds"))
+diff_som <- readRDS(paste0(source_path, "home/tufenc/huge_val_ds_2020_11_13.rds"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# path_to_files
+```{r path_to_files}
+path_to_gold_standard_control_files_1 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02672_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_2 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02676_fcs_2020_09_25")
+
+# path_to_gold_standard_control_files_3 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02677_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_3 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02678_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_4 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02679_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_5 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02683_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_6 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02684_fcs_2020_09_25")
+
+path_to_gold_standard_control_files_7 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03540_fcs")
+
+path_to_gold_standard_control_files_8 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03541_fcs")
+
+path_to_gold_standard_control_files_9 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03542_fcs")
+
+path_to_gold_standard_control_files_10 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03564_fcs")
+
+path_to_gold_standard_control_files_11 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02020_fcs")
+
+path_to_gold_standard_control_files_12 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02027_fcs")
+
+path_to_gold_standard_control_files_13 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02042_fcs")
+
+path_to_gold_standard_control_files_14 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02043_fcs")
+
+path_to_gold_standard_control_files_15 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02044_fcs")
+
+path_to_gold_standard_control_files_16 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02045_fcs")
+
+path_to_gold_standard_control_files_17 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02046_fcs")
+
+path_to_gold_standard_control_files_18 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02055_fcs")
+
+path_to_gold_standard_control_files_19 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02056_fcs")
+
+path_to_gold_standard_control_files_20 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02057_fcs")
+
+
+
+path_to_files <- list(path_to_gold_standard_control_files_1,
+                      path_to_gold_standard_control_files_2,
+                      path_to_gold_standard_control_files_3,
+                      path_to_gold_standard_control_files_4,
+                      path_to_gold_standard_control_files_5,
+                      path_to_gold_standard_control_files_6,
+                      path_to_gold_standard_control_files_7,
+                      path_to_gold_standard_control_files_8,
+                      path_to_gold_standard_control_files_9,
+                      path_to_gold_standard_control_files_10,
+                      path_to_gold_standard_control_files_11,
+                      path_to_gold_standard_control_files_12,
+                      path_to_gold_standard_control_files_13,
+                      path_to_gold_standard_control_files_14,
+                      path_to_gold_standard_control_files_15,
+                      path_to_gold_standard_control_files_16,
+                      path_to_gold_standard_control_files_17,
+                      path_to_gold_standard_control_files_18
+                      # path_to_gold_standard_control_files_19,
+                      # path_to_gold_standard_control_files_20
+                      )
+
+files <- path_to_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+
+file_names <- path_to_files %>% purrr::map(list.files, pattern = ".fcs")
+
+indices_list <- purrr::map(seq_along(files), function(j) purrr::map(seq_along(panel_A_classes), function(i) files[[j]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist())
+files_to_load_list <- purrr::map(seq_along(files), function(j) files[[j]][indices_list[[j]]])
+files_to_load_names_list <- purrr::map(seq_along(files), function(j) file_names[[j]][indices_list[[j]]])
+
+# for new samples from 03/11/2020
+files_to_load_list <- purrr::map(seq_along(files_to_load_list), function(i) files_to_load_list[[i]][-c(22)] )
+files_to_load_names_list <- purrr::map(seq_along(files_to_load_names_list), function(i) files_to_load_names_list[[i]][-c(22)] )
+
+# files_to_load_list[[9]] <- files_to_load_list[[9]][-c(56)]
+# files_to_load_names_list[[9]] <- files_to_load_names_list[[9]][-c(56)]
+# files_to_load_list[[13]] <- files_to_load_list[[9]][-c(56)]
+# files_to_load_names_list[[13]] <- files_to_load_names_list[[9]][-c(56)]
+
+# files_to_load_list[[4]] <- files_to_load_list[[4]][-c(6, 24, 28, 48)]
+# files_to_load_names_list[[4]] <- files_to_load_names_list[[4]][-c(6, 24, 28, 48)]
+
+tic()
+diff_som_1 <- files_to_load_list %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+diff_som_1 <- readRDS(paste0(source_path, "home/trufenc/diff_som_11_2020.rds"))
+
+cell_types_control <- diff_som_1$files %>% 
+  unlist() %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._c....._..._..._")
+
+cell_types <- cell_types_control
+# cell_types[cell_types %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+cell_types <- cell_types[!is.na(cell_types)]
+# files_to_load_list %>% unlist()
+
+# facs_data_df <- diff_som_1_normalized %>% build_fcs_data_df(cell_types = cell_types)
+facs_data_df <- diff_som_1 %>% build_fcs_data_df(cell_types = cell_types)
+
+facs_data_df <- facs_data_df %>% add_first_gate_column()
+
+facs_data_df <- facs_data_df %>% add_second_gate_column()
+
+facs_data_df <- facs_data_df %>% add_Res_Eff_Naive_gate_column()
+
+facs_data_df <- facs_data_df %>% add_Klrg1_gate_column()
+
+facs_data_df_step_3 <- facs_data_df %>% dplyr::filter(first_gate != "not_live") %>% dplyr::filter(!(second_gate %in% c("Not_Panel_A_cell_types", "CD8+_cells")))
+
+facs_data_df_step_CD8 <- facs_data_df %>% dplyr::filter(first_gate != "not_live") %>% dplyr::filter(second_gate == "CD8+_cells")
+
+third_gate_table <- facs_data_df_step_3 %>% group_by(Res_Eff_Naive_gate) %>% tally()
+
+CD8_gate_table <- facs_data_df_step_CD8 %>% group_by(Res_Eff_Naive_gate) %>% tally()
+
+train_df_step_3 <- facs_data_df_step_3
+
+train_df_step_CD8 <- facs_data_df_step_CD8
+# train_df_step_CD8 %>% vroom::vroom_write(path = "~/PRIMUS/home/trufenc/train_df_step_CD8_2020_11_06.tsv", delim = "\t")
+
+# balance data
+# train_df_step_CD8 <- facs_data_df_step_CD8 %>% split(f = .$Res_Eff_Naive_gate) %>% purrr::map(function(x) x %>% dplyr::slice(sample(20400))) %>% bind_rows(.id = "Res_Eff_Naive_gate")
+```
+
+```{r}
+val_path_to_files <- list(
+  # path_to_gold_standard_control_files_1,
+  #                       path_to_gold_standard_control_files_2,
+  #                       path_to_gold_standard_control_files_3,
+  #                       path_to_gold_standard_control_files_4,
+  #                       path_to_gold_standard_control_files_5,
+  #                       path_to_gold_standard_control_files_6,
+  #                       path_to_gold_standard_control_files_7,
+  #                       path_to_gold_standard_control_files_8,
+  #                       path_to_gold_standard_control_files_9,
+  #                       path_to_gold_standard_control_files_10,
+  #                       path_to_gold_standard_control_files_11,
+  #                       path_to_gold_standard_control_files_12,
+  #                       path_to_gold_standard_control_files_13,
+  #                       path_to_gold_standard_control_files_14,
+  #                       path_to_gold_standard_control_files_15,
+  #                       path_to_gold_standard_control_files_16,
+  #                       path_to_gold_standard_control_files_17,
+  #                       path_to_gold_standard_control_files_18
+  path_to_gold_standard_control_files_19,
+  path_to_gold_standard_control_files_20
+)
+
+val_files <- val_path_to_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+
+val_file_names <- val_path_to_files %>% purrr::map(list.files, pattern = ".fcs")
+
+val_indices_list <- purrr::map(seq_along(val_files), function(j) purrr::map(seq_along(panel_A_classes), function(i) val_files[[j]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist())
+val_files_to_load_list <- purrr::map(seq_along(val_files), function(j) val_files[[j]][val_indices_list[[j]]])
+val_files_to_load_names_list <- purrr::map(seq_along(val_files), function(j) val_file_names[[j]][val_indices_list[[j]]])
+
+val_files_to_load_list <- purrr::map(seq_along(val_files_to_load_list), function(i) val_files_to_load_list[[i]][-c(22)] )
+val_files_to_load_names_list <- purrr::map(seq_along(val_files_to_load_names_list), function(i) val_files_to_load_names_list[[i]][-c(22)] )
+
+tic()
+val_diff_som_1 <- val_files_to_load_list %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+val_diff_som_1 <- readRDS(paste0(source_path, "home/trufenc/val_diff_som_11_2020.rds"))
+
+val_cell_types_control <- val_diff_som_1$files %>% 
+  unlist() %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._c....._..._..._")
+
+val_cell_types <- val_cell_types_control
+# cell_types[cell_types %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+val_cell_types <- val_cell_types[!is.na(val_cell_types)]
+# files_to_load_list %>% unlist()
+
+# val_facs_data_df <- val_diff_som_1_normalized %>% build_fcs_data_df(cell_types = cell_types)
+val_facs_data_df <- val_diff_som_1 %>% build_fcs_data_df(cell_types = val_cell_types)
+
+val_facs_data_df <- val_facs_data_df %>% add_first_gate_column()
+
+val_facs_data_df <- val_facs_data_df %>% add_second_gate_column()
+
+val_facs_data_df <- val_facs_data_df %>% add_Res_Eff_Naive_gate_column()
+
+val_facs_data_df <- val_facs_data_df %>% add_Klrg1_gate_column()
+
+val_facs_data_df_step_3 <- val_facs_data_df %>% dplyr::filter(first_gate != "not_live") %>% dplyr::filter(!(second_gate %in% c("Not_Panel_A_cell_types", "CD8+_cells")))
+
+val_facs_data_df_step_CD8 <- val_facs_data_df %>% dplyr::filter(first_gate != "not_live") %>% dplyr::filter(second_gate == "CD8+_cells")
+
+val_third_gate_table <- val_facs_data_df_step_3 %>% group_by(Res_Eff_Naive_gate) %>% tally()
+
+val_CD8_gate_table <- val_facs_data_df_step_CD8 %>% group_by(Res_Eff_Naive_gate) %>% tally()
+
+val_df_step_3 <- val_facs_data_df_step_3
+
+val_df_step_CD8 <- val_facs_data_df_step_CD8
+# val_df_step_CD8 %>% vroom::vroom_write(path = "~/PRIMUS/home/trufenc/val_df_step_CD8_2020_11_06.tsv", delim = "\t")
+# val_df_step_CD8 <- val_facs_data_df_step_CD8 %>% split(f = .$Res_Eff_Naive_gate) %>% purrr::map(function(x) x %>% dplyr::slice(sample(2100))) %>% bind_rows(.id = "Res_Eff_Naive_gate")
+
+
+```
+
+```{r}
+# path_to_gold_standard_control_files_1 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02672_fcs_2020_09_25")
+# 
+# path_to_gold_standard_control_files_2 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02676_fcs_2020_09_25")
+# 
+# # path_to_gold_standard_control_files_3 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02677_fcs_2020_09_25")
+# 
+# path_to_gold_standard_control_files_3 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02678_fcs_2020_09_25")
+# 
+# path_to_gold_standard_control_files_4 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02679_fcs_2020_09_25")
+# 
+# path_to_gold_standard_control_files_5 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02683_fcs_2020_09_25")
+# 
+# path_to_gold_standard_control_files_6 <- paste0(source_path, "home/trufenc/fcs_files/c122/Specimen_001_c02684_fcs_2020_09_25")
+# 
+# path_to_gold_standard_control_files_7 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03540_fcs")
+# 
+# path_to_gold_standard_control_files_8 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03541_fcs")
+# 
+# path_to_gold_standard_control_files_9 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03542_fcs")
+# 
+# path_to_gold_standard_control_files_10 <- paste0(source_path, "home/trufenc/fcs_files/c146/Specimen_001_c03564_fcs")
+# 
+# path_to_gold_standard_control_files_11 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02020_fcs")
+# 
+# path_to_gold_standard_control_files_12 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02027_fcs")
+# 
+# path_to_gold_standard_control_files_13 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02042_fcs")
+# 
+# path_to_gold_standard_control_files_14 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02043_fcs")
+# 
+# path_to_gold_standard_control_files_15 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02044_fcs")
+# 
+# path_to_gold_standard_control_files_16 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02045_fcs")
+# 
+# path_to_gold_standard_control_files_17 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02046_fcs")
+# 
+# path_to_gold_standard_control_files_18 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02055_fcs")
+# 
+# path_to_gold_standard_control_files_19 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02056_fcs")
+# 
+# path_to_gold_standard_control_files_20 <- paste0(source_path, "home/trufenc/fcs_files/c145/Specimen_001_c02057_fcs")
+# 
+# 
+# 
+# path_to_files <- list(path_to_gold_standard_control_files_1,
+#                       path_to_gold_standard_control_files_2,
+#                       path_to_gold_standard_control_files_3,
+#                       path_to_gold_standard_control_files_4,
+#                       path_to_gold_standard_control_files_5,
+#                       path_to_gold_standard_control_files_6,
+#                       path_to_gold_standard_control_files_7,
+#                       path_to_gold_standard_control_files_8,
+#                       path_to_gold_standard_control_files_9,
+#                       path_to_gold_standard_control_files_10,
+#                       path_to_gold_standard_control_files_11,
+#                       path_to_gold_standard_control_files_12,
+#                       path_to_gold_standard_control_files_13,
+#                       path_to_gold_standard_control_files_14,
+#                       path_to_gold_standard_control_files_15,
+#                       path_to_gold_standard_control_files_16,
+#                       path_to_gold_standard_control_files_17,
+#                       path_to_gold_standard_control_files_18,
+#                       path_to_gold_standard_control_files_19,
+#                       path_to_gold_standard_control_files_20
+#                       )
+# 
+# files <- path_to_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+# 
+# file_names <- path_to_files %>% purrr::map(list.files, pattern = ".fcs")
+# 
+# indices_list <- purrr::map(seq_along(files), function(j) purrr::map(seq_along(panel_A_classes), function(i) files[[j]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist())
+# files_to_load_list <- purrr::map(seq_along(files), function(j) files[[j]][indices_list[[j]]])
+# files_to_load_names_list <- purrr::map(seq_along(files), function(j) file_names[[j]][indices_list[[j]]])
+# files_to_load_list[[9]] <- files_to_load_list[[9]][-c(56)]
+# files_to_load_names_list[[9]] <- files_to_load_names_list[[9]][-c(56)]
+# files_to_load_list[[13]] <- files_to_load_list[[9]][-c(56)]
+# files_to_load_names_list[[13]] <- files_to_load_names_list[[9]][-c(56)]
+# 
+# # to_load <- files_to_load_list[[6]][53:58] %>% unlist()
+# to_load <- files_to_load_list %>% unlist()
+# # to_load_names <- files_to_load_names_list[[6]][53:58] %>% unlist()
+# to_load_names <- files_to_load_names_list %>% unlist()
+# 
+# diff_som_1 <- readRDS(file = paste0(source_path, "home/trufenc/diff_som_12_million_events.rds"))
+# 
+# diff_som_1_normalized <- diff_som_1 %>% pre_process_data()
+# 
+# cell_types_control <- diff_som_1$files %>% 
+#   str_remove(pattern = ".fcs") %>% 
+#   str_remove(pattern = "export_Specimen_..._c....._..._..._") 
+# 
+# cell_types <- cell_types_control
+# # cell_types[cell_types %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+# cell_types <- cell_types[!is.na(cell_types)]
+# # files_to_load_list %>% unlist()
+# 
+# # facs_data_df <- diff_som_1_normalized %>% build_fcs_data_df(cell_types = cell_types)
+# facs_data_df <- diff_som_1 %>% build_fcs_data_df(cell_types = cell_types)
+# 
+# 
+# facs_data_df <- facs_data_df %>% add_first_gate_column()
+# 
+# facs_data_df <- facs_data_df %>% add_second_gate_column()
+# 
+# facs_data_df <- facs_data_df %>% add_third_gate_column()
+# 
+# facs_data_df_step_3 <- facs_data_df %>% dplyr::filter(!(third_gate %in% c("not_live", "Not_Panel_A_cell_types"))) %>% dplyr::filter(second_gate != "CD8+_cells")
+# 
+# third_gate_table <- table(facs_data_df_step_3$third_gate)
+# third_gate_table <- facs_data_df_step_3 %>% group_by(third_gate) %>% tally()
+# 
+# # Manage imbalance
+# facs_data_df_step_3_Res_Klrg1_pos <- facs_data_df_step_3 %>% 
+#   dplyr::filter(third_gate %in% c("Res_Klrg1_pos")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# set.seed(123)
+# new_synthetic_Res_Klrg1_pos <- facs_data_df_step_3_Res_Klrg1_pos %>% 
+#   imbalance::rwo(numInstances = 250000, classAttr = "third_gate")
+# 
+# facs_data_df_step_3_Eff_Klrg1_pos <- facs_data_df_step_3 %>% 
+#   dplyr::filter(third_gate %in% c("Eff_Klrg1_pos")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# set.seed(123)
+# new_synthetic_Eff_Klrg1_pos <- facs_data_df_step_3_Eff_Klrg1_pos %>% 
+#   imbalance::rwo(numInstances = 250000, classAttr = "third_gate")
+# 
+# facs_data_df_step_3_Neg <- facs_data_df_step_3 %>% 
+#   dplyr::filter(third_gate %in% c("Neg")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# set.seed(123)
+# new_synthetic_Neg <- facs_data_df_step_3_Neg %>% 
+#   imbalance::rwo(numInstances = 180000, classAttr = "third_gate")
+# 
+# # "2108 samples filtered by NEATER"
+# tic()
+# Res_Klrg1_pos_neater <- neater(dataset = facs_data_df_step_3_Res_Klrg1_pos, 
+#                                newSamples = new_synthetic_Res_Klrg1_pos, 
+#                                classAttr = "third_gate", 
+#                                iterations = 5)
+# toc()
+# 
+# Res_Klrg1_pos_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Res_Klrg1_pos_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# # "337 samples filtered by NEATER"
+# tic()
+# Eff_Klrg1_pos_neater <- neater(dataset = facs_data_df_step_3_Eff_Klrg1_pos, 
+#                                newSamples = new_synthetic_Eff_Klrg1_pos, 
+#                                classAttr = "third_gate", 
+#                                iterations = 5)
+# toc()
+# 
+# Eff_Klrg1_pos_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Eff_Klrg1_pos_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# # "38 samples filtered by NEATER"
+# tic()
+# Neg_neater <- neater(dataset = facs_data_df_step_3_Neg, 
+#                                newSamples = new_synthetic_Neg, 
+#                                classAttr = "third_gate", 
+#                                iterations = 5)
+# toc()
+# 
+# Neg_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Neg_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# 
+# # Undersample cell types
+# # create balanced cell types df with 100,000 events each
+# 
+# Res_Klrg1_pos_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Res_Klrg1_pos_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# Eff_Klrg1_pos_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Eff_Klrg1_pos_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# Neg_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Neg_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# facs_data_df_step_3_list <- facs_data_df_step_3 %>% split(f = .$third_gate)
+# 
+# set.seed(123)
+# facs_data_df_step_3_list$Eff_Klrg1_neg <- facs_data_df_step_3_list$Eff_Klrg1_neg %>% dplyr::slice(sample(200000))
+# 
+# set.seed(123)
+# facs_data_df_step_3_list$Res_Klrg1_neg <- facs_data_df_step_3_list$Res_Klrg1_neg %>% dplyr::slice(sample(200000))
+# 
+# set.seed(123)
+# facs_data_df_step_3_list$Res_Klrg1_pos <- Res_Klrg1_pos_neater %>% dplyr::slice(sample(200000-nrow(facs_data_df_step_3_list$Res_Klrg1_pos))) %>% bind_rows(facs_data_df_step_3_list$Res_Klrg1_pos)
+# 
+# set.seed(123)
+# facs_data_df_step_3_list$Eff_Klrg1_pos <- Eff_Klrg1_pos_neater %>% dplyr::slice(sample(200000-nrow(facs_data_df_step_3_list$Eff_Klrg1_pos))) %>% bind_rows(facs_data_df_step_3_list$Eff_Klrg1_pos)
+# 
+# set.seed(123)
+# facs_data_df_step_3_list$Neg <- Neg_neater %>% dplyr::slice(sample(200000-nrow(facs_data_df_step_3_list$Neg))) %>% bind_rows(facs_data_df_step_3_list$Neg)
+# 
+# facs_data_df_step_3 <- facs_data_df_step_3_list %>% bind_rows(.id = "third_gate")
+# 
+# facs_data_df_step_3 <- facs_data_df_step_3 %>% dplyr::select(-c(Time, cell_type, first_gate, second_gate))
+# 
+# facs_data_df_step_3 %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/balanced_data_5_classes_third_gate_2020_10_05.tsv"), delim = "\t")
+# 
+# facs_data_df_step_3 <- vroom::vroom(file = paste0(source_path, "home/trufenc/balanced_data_5_classes_third_gate_2020_10_05.tsv"), delim = "\t")
+# 
+# # sort data
+# reseed()
+# facs_data_df_step_3 <- facs_data_df_step_3 %>% dplyr::slice(sample(nrow(facs_data_df_step_3)))
+# 
+# # Set train and test dfs
+# train_index_step_3 <- sample(1:nrow(facs_data_df_step_3), 0.7 * nrow(facs_data_df_step_3))
+# 
+# train_df_step_3 <- facs_data_df_step_3[train_index_step_3, ] %>% dplyr::select(-c("File", "File_scattered"))
+# test_df_step_3 <- facs_data_df_step_3[-train_index_step_3, ] %>% dplyr::select(-c("File", "File_scattered"))
+# 
+# # rf_train_step_3 <- train_df_step_3 %>% mutate(third_gate = third_gate %>% factor(levels = c("Eff_Klrg1_neg", "Eff_Klrg1_pos", "Res_Klrg1_neg", "Res_Klrg1_pos", "Neg")))
+# 
+# # library(spm)
+# 
+# # tic()
+# # rf_cv_results <- rgcv(trainx = rf_train_step_3 %>% dplyr::select(-c(third_gate)), trainy = rf_train_step_3$third_gate, num.trees = 500, mtry = 1, splitrule = "extratrees", min.node.size = 1, max.depth = 1, num.threads = 50)
+# # toc()
+```
+
+# XGBoost step 3
+```{r}
+library(xgboost)
+step_3_levels <- train_df_step_3$Res_Eff_Naive_gate %>% unique()
+
+n_classes <- length(step_3_levels)
+
+classes_number <- data.frame(
+  classes = step_3_levels,
+  Number = 1:length(step_3_levels)
+)
+
+val_label_step_3 <- val_df_step_3 %>%
+  dplyr::select(Res_Eff_Naive_gate) %>%
+  pull() %>%
+  str_replace(pattern = "Eff", replacement = "1") %>%
+  str_replace(pattern = "Res", replacement = "2") %>%
+  str_replace(pattern = "Neg", replacement = "3") %>%
+  as.numeric() %>%
+  "-"(1)
+
+train_label_step_3 <- train_df_step_3 %>%
+  dplyr::select(Res_Eff_Naive_gate) %>%
+  pull() %>%
+  str_replace(pattern = "Eff", replacement = "1") %>%
+  str_replace(pattern = "Res", replacement = "2") %>%
+  str_replace(pattern = "Neg", replacement = "3") %>%
+  as.numeric() %>%
+  "-"(1)
+
+train_matrix_step_3 <- xgb.DMatrix(
+  data = train_df_step_3 %>%  
+    dplyr::select(-c(Time, File, File_scattered, cell_type, first_gate, second_gate, Res_Eff_Naive_gate, Klrg1_gate)) %>%
+    # dplyr::select(-c(third_gate)) %>%
+    as.matrix(),
+  label = train_label_step_3
+  )
+
+val_matrix_step_3 <- xgb.DMatrix(
+  data = val_df_step_3 %>%  
+    dplyr::select(-c(Time, File, File_scattered, cell_type, first_gate, second_gate, Res_Eff_Naive_gate, Klrg1_gate)) %>%
+    # dplyr::select(-c(third_gate)) %>%
+    as.matrix(),
+  label = val_label_step_3
+  )
+
+k_fold <- 10
+
+n_round <- 100
+
+# xgb_params <- list(
+#   booster = "gbtree",
+#   # booster = "dart",
+#   objective = "multi:softprob",
+#   eta = 0.1,
+#   gamma = 6.22,
+#   max_depth = 10,
+#   min_child_weight = 9.11,
+#   subsample = 0.991,
+#   colsample_bytree = 0.955,
+#   num_class = n_classes,
+#   nthread = 6
+# )
+
+xgb_params <- list(
+  booster = "gbtree",
+  # booster = "dart",
+  objective = "multi:softprob",
+  eta = 0.3,
+  gamma = 1.61,
+  alpha = 0,
+  max_depth = 5,
+  min_child_weight = 2.89,
+  subsample = 0.943,
+  colsample_bytree = 0.852,
+  num_class = n_classes,
+  nthread = 6
+)
+
+tic()
+xgb_cv_model_3 <- xgb.cv(
+  params = xgb_params,
+  data = train_matrix_step_3,
+  nrounds = n_round,
+  nfold = k_fold,
+  showsd = T,
+  stratified = T,
+  print_every_n = 1,
+  early_stopping_rounds = 5,
+  maximize = F,
+  prediction = TRUE
+)
+toc()
+
+# xgb_cv_model_3 %>% saveRDS(paste0(source_path, "home/trufenc/xgboost_model_step__3_2020_11_09.rds")) # 99.90 % accuracy, 99.79 % kappa for test
+
+xgb_cv_model_3$best_iteration
+
+xgb_cv_model_3$evaluation_log %>% dplyr::filter(iter == xgb_cv_model_3$best_iteration) %>% dplyr::select(test_merror_mean) %>% pull
+
+xgb_cv_model_3$evaluation_log %>% mutate(diff = test_merror_mean - train_merror_mean) %>% View()
+
+xgb_cv_model_3$evaluation_log %>% 
+  ggplot(aes(x = iter)) +
+  geom_line(aes(y = train_merror_mean, colour = "train")) + 
+  geom_line(aes(y = test_merror_mean, colour = "test"))
+
+# first default - model training
+tic()
+xgb_3 <- xgb.train(
+  params = xgb_params, 
+  data = train_matrix_step_3, 
+  nrounds = xgb_cv_model_3$best_iteration,
+  # nrounds = 14,
+  watchlist = list(val = val_matrix_step_3, train = train_matrix_step_3), 
+  print_every_n = 1, 
+  early_stopping_rounds = 10, 
+  maximize = F , 
+  eval_metric = "merror"
+  )
+toc()
+
+# xgb_3 %>% saveRDS(paste0(source_path, "home/trufenc/xgboost_model_step_3_2020_10_12.rds"))
+# xgb_3 %>% saveRDS(paste0(source_path, "home/trufenc/xgboost_model_step_3_2020_10_22.rds"))
+
+xgb_pred_3 <- predict(xgb_3, val_matrix_step_3)
+
+val_prediction_df <- matrix(
+  data = xgb_pred_3,
+  nrow = n_classes,
+  ncol = length(xgb_pred_3) / n_classes
+  ) %>%
+  t() %>%
+  data.frame()
+
+val_prediction <- val_prediction_df %>%
+  mutate(
+    label = val_label_step_3 %>% as.numeric() + 1,
+    max_prob = max.col(., "last")
+  )
+
+library(caret)
+confusion_matrix <- confusionMatrix(factor(val_prediction$label), factor(val_prediction$max_prob))
+
+#view variable importance plot
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix_step_3), model = xgb_3)
+
+gp = xgb.ggplot.importance(importance_matrix = importance_matrix)
+print(gp)
+```
+
+# independent dataset to test
+# https://github.com/RGLab/flowCore/issues/108
+```{r}
+path_to_test_files_1 <- paste0(source_path, "home/trufenc/fcs_files/c120/Specimen_001_c00259_fcs")
+
+path_to_test_files_2 <- paste0(source_path, "home/trufenc/fcs_files/c120/Specimen_001_c00260_fcs")
+
+path_to_test_files_3 <- paste0(source_path, "home/trufenc/fcs_files/c120/Specimen_001_c00261_fcs")
+
+path_to_test_files_4 <- paste0(source_path, "home/trufenc/fcs_files/c120/Specimen_001_c00262_fcs")
+
+path_to_test_files_5 <- paste0(source_path, "home/trufenc/fcs_files/c120/Specimen_001_c00263_fcs")
+
+path_to_test_files_6 <- paste0(source_path, "home/trufenc/fcs_files/c120/Specimen_001_c00273_fcs")
+
+path_to_test_files_7 <- paste0(source_path, "home/trufenc/fcs_files/c120/Specimen_001_c00602_fcs")
+
+path_to_test_files_8 <- paste0(source_path, "home/trufenc/fcs_files/c120/Specimen_001_c00603_fcs")
+
+path_to_test_files_9 <- paste0(source_path, "home/trufenc/fcs_files/c120/Specimen_001_c00604_fcs")
+
+path_to_test_files_10 <- paste0(source_path, "home/trufenc/fcs_files/c120/Specimen_001_c002601_fcs")
+
+test_path_to_files <- list(
+  path_to_test_files_1,
+  path_to_test_files_2,
+  path_to_test_files_3,
+  path_to_test_files_4,
+  path_to_test_files_5,
+  path_to_test_files_6,
+  path_to_test_files_7,
+  path_to_test_files_8,
+  path_to_test_files_9,
+  path_to_test_files_10
+)
+
+test_files <- test_path_to_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+
+test_file_names <- test_path_to_files %>% purrr::map(list.files, pattern = ".fcs")
+
+test_indices_list <- purrr::map(seq_along(test_files), function(j) purrr::map(seq_along(panel_A_classes), function(i) test_files[[j]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist())
+
+test_files_to_load_list <- purrr::map(seq_along(test_files), function(j) test_files[[j]][test_indices_list[[j]]])
+
+test_files_to_load_names_list <- purrr::map(seq_along(test_files), function(j) test_file_names[[j]][test_indices_list[[j]]])
+
+
+test_files_to_load_list <- purrr::map(seq_along(test_files_to_load_list), function(i) test_files_to_load_list[[i]][-c(22)] )
+test_files_to_load_names_list <- purrr::map(seq_along(test_files_to_load_names_list), function(i) test_files_to_load_names_list[[i]][-c(22)] )
+
+# files_to_load_list[[9]] <- files_to_load_list[[9]][-c(56)]
+# files_to_load_names_list[[9]] <- files_to_load_names_list[[9]][-c(56)]
+# files_to_load_list[[13]] <- files_to_load_list[[9]][-c(56)]
+# files_to_load_names_list[[13]] <- files_to_load_names_list[[9]][-c(56)]
+
+# test_files_to_load <- list.files(path = test_path_to_files, pattern = ".fcs", full.names = TRUE)
+
+# test_files_to_load <- test_files_to_load[-33]
+
+tic()
+test_diff_som <- test_files_to_load_list %>% unlist() %>% load_fcs_files(n_cells = 1e20, filter = TRUE, to_filter = c(1:6), scale = FALSE, transform = TRUE, to_transform = c(1:18))
+toc()
+
+test_diff_som <- readRDS(paste0(source_path, "home/trufenc/test_diff_som_11_2020.rds"))
+
+test_cell_types_control <- test_diff_som$files %>% 
+  unlist() %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._c....._..._..._")
+
+test_cell_types <- test_cell_types_control
+test_cell_types <- test_cell_types[!is.na(test_cell_types)]
+
+test_facs_data_df <- test_diff_som %>% build_fcs_data_df(cell_types = test_cell_types)
+
+test_facs_data_df <- test_facs_data_df %>% add_first_gate_column()
+
+test_facs_data_df <- test_facs_data_df %>% add_second_gate_column()
+
+test_facs_data_df <- test_facs_data_df %>% add_Res_Eff_Naive_gate_column()
+
+test_facs_data_df <- test_facs_data_df %>% add_Klrg1_gate_column()
+
+test_df_step_3 <- test_facs_data_df %>% dplyr::filter(first_gate != "not_live") %>% dplyr::filter(!(second_gate %in% c("Not_Panel_A_cell_types", "CD8+_cells")))
+
+step_3_levels <- test_df_step_3$Res_Eff_Naive_gate %>% unique()
+
+n_classes <- length(step_3_levels)
+
+test_label <- test_df_step_3 %>%
+  dplyr::select(Res_Eff_Naive_gate) %>%
+  pull() %>%
+  str_replace(pattern = "Eff", replacement = "1") %>%
+  str_replace(pattern = "Res", replacement = "2") %>%
+  str_replace(pattern = "Neg", replacement = "3") %>%
+  as.numeric() %>%
+  "-"(1)
+
+test_matrix <- xgb.DMatrix(
+  # data = EmbedSOM_results_step_3$weights_df[-test_indices, ] %>%
+  # data = test_EmbedSOM_results_step_3$weights_df %>%  
+  data = test_df_step_3 %>%    
+    dplyr::select(-c(Time, File, File_scattered, cell_type, first_gate, second_gate, Res_Eff_Naive_gate, Klrg1_gate)) %>%
+    # dplyr::select(-c(first_gate)) %>%
+    as.matrix(),
+  label = test_label
+  )
+
+xgb_pred_3 <- predict(xgb_3, test_matrix)
+
+test_prediction_df <- matrix(
+  data = xgb_pred_3,
+  nrow = n_classes,
+  ncol = length(xgb_pred_3) / n_classes
+  ) %>%
+  t() %>%
+  data.frame()
+
+test_prediction <- test_prediction_df %>%
+  mutate(
+    label = test_label %>% as.numeric() + 1,
+    max_prob = max.col(., "last")
+  )
+
+library(caret)
+test_confusion_matrix <- confusionMatrix(factor(test_prediction$label), factor(test_prediction$max_prob))
+
+#view variable importance plot
+test_importance_matrix <- xgb.importance(feature_names = colnames(train_matrix_step_3), model = xgb_3)
+
+gp = xgb.ggplot.importance(importance_matrix = importance_matrix)
+print(gp)
+```
+
+# mlr - xgboost
+# Tune max_depth and min_child_weight
+```{r}
+library(mlr)
+
+# Convert characters to factors
+train_df <- train_df_step_3 %>% dplyr::select(-c(Time, File, File_scattered, cell_type, first_gate, second_gate, Klrg1_gate)) %>% mutate(Res_Eff_Naive_gate = Res_Eff_Naive_gate %>% factor()) %>% as.data.frame()
+test_df <- val_df_step_3 %>% dplyr::select(-c(Time, File, File_scattered, cell_type, first_gate, second_gate, Klrg1_gate)) %>%  mutate(Res_Eff_Naive_gate = Res_Eff_Naive_gate %>% factor()) %>% as.data.frame()
+
+# Do one hot encoding`<br/>
+train_df <- createDummyFeatures(obj = train_df, target = "Res_Eff_Naive_gate", method = "1-of-n")
+test_df <- createDummyFeatures(obj = test_df, target = "Res_Eff_Naive_gate", method = "1-of-n")
+
+# Create tasks
+train_task <- makeClassifTask(data = train_df, target = "Res_Eff_Naive_gate")
+test_task <- makeClassifTask(data = test_df, target = "Res_Eff_Naive_gate")
+
+# Create learner
+lrn <- makeLearner("classif.xgboost", predict.type = "response")
+lrn$par.vals <- list(objective = "multi:softprob", etest_metric = "merror", nrounds = 100L, booster = "gbtree", max_depth = 5, min_child_weight = 2.89, gamma = 1.61, subsample = 0.943, colsample_bytree = 0.852, nthread = 6)
+
+# Set parameter space
+params <- makeParamSet(
+  # makeDiscreteParam("booster", values = c("gbtree", "dart")),
+  # makeIntegerParam("max_depth", lower = 3L, upper = 10L),
+  # makeNumericParam("min_child_weight", lower = 1L, upper = 10L)
+  # makeNumericParam("gamma", lower = 0L, upper = 10L)
+  # makeNumericParam("subsample", lower = 0.5, upper = 1),
+  # makeNumericParam("colsample_bytree", lower = 0.5, upper = 1)
+  makeNumericParam("alpha", lower = 0, upper = 1),
+  makeNumericParam("eta", lower = 0.001, upper = 1)
+)
+
+# set resampling strategy
+rdesc <- makeResampleDesc("CV", stratify = T, iters = 5L)
+
+# Search strategy
+ctrl <- makeTuneControlRandom(maxit = 10L)
+
+# Set parallel backend
+# library(parallel)
+# library(parallelMap) 
+# parallelStartSocket(cpus = (detectCores()-1))
+# parallelStartSocket(cpus = 6)
+
+#parameter tuning
+tic()
+xgb_tuning <- tuneParams(learner = lrn, task = train_task, resampling = rdesc, measures = acc, par.set = params, control = ctrl, show.info = T)
+toc()
+
+# xgb_tuning %>% saveRDS("~/Documents/xgb_tuning_step_3_balanced_data.rds")
+# xgb_tuning <- readRDS("~/Documents/xgb_tuning_step_3_balanced_data.rds")
+
+xgb_tuning$y
+
+#set hyperparameters
+lrn_tune <- setHyperPars(lrn,par.vals = xgb_tuning$x)
+
+#train model
+xg_model <- train(learner = lrn_tune, task = train_task)
+
+#predict model
+xg_pred <- predict(xg_model, test_task)
+
+confusion_matrix <- confusionMatrix(xg_pred$data$response, xg_pred$data$truth)
+
+conf_df <- confusion_matrix$byClass %>% as.data.frame()
+
+conf_df$F1
+```
+
+# Step 3 for CD8+ cells
+```{r}
+# # facs_data_df$fourth_gate <- NULL
+# 
+# facs_data_df_CD8 <- facs_data_df %>% dplyr::filter(!(third_gate %in% c("not_live", "Not_Panel_A_cell_types"))) %>% dplyr::filter(second_gate == "CD8+_cells")
+# 
+# third_gate_CD8_table <- facs_data_df_CD8 %>% group_by(third_gate) %>% tally()
+# 
+# # Manage imbalance
+# facs_data_df_CD8_Res_Klrg1 <- facs_data_df_CD8 %>% 
+#   dplyr::filter(third_gate %in% c("Res_Klrg1_pos", "Res_Klrg1_neg")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# facs_data_df_CD8_Res_Klrg1_pos <- facs_data_df_CD8 %>% 
+#   dplyr::filter(third_gate %in% c("Res_Klrg1_pos")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# set.seed(123)
+# new_synthetic_CD8_Res_Klrg1_pos <- facs_data_df_CD8_Res_Klrg1_pos %>% 
+#   imbalance::rwo(numInstances = 1000000, classAttr = "third_gate")
+# 
+# 
+# # 15103.426 sec elapsed
+# # "208242 samples filtered by NEATER"
+# tic()
+# Res_Klrg1_pos_CD8_neater <- neater(
+#   # dataset = facs_data_df_CD8_Res_Klrg1, 
+#   dataset = facs_data_df_CD8_Res_Klrg1_pos,
+#   newSamples = new_synthetic_CD8_Res_Klrg1_pos, 
+#   classAttr = "third_gate", 
+#   iterations = 5)
+# toc()
+# 
+# # Res_Klrg1_pos_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Res_Klrg1_pos_CD8_neater_2020_10_07.tsv"), delim = "\t")
+# 
+# Res_Klrg1_pos_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Res_Klrg1_pos_CD8_neater_2020_10_09.tsv"), delim = "\t")
+# 
+# 
+# facs_data_df_CD8_Res_Klrg1_neg_Neg <- facs_data_df_CD8 %>% 
+#   dplyr::filter(third_gate %in% c("Res_Klrg1_neg", "Neg")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# facs_data_df_CD8_Res_Klrg1_neg <- facs_data_df_CD8 %>% 
+#   dplyr::filter(third_gate %in% c("Res_Klrg1_neg")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# set.seed(123)
+# new_synthetic_CD8_Res_Klrg1_neg <- facs_data_df_CD8_Res_Klrg1_neg %>% 
+#   imbalance::rwo(numInstances = 400000, classAttr = "third_gate")
+# 
+# tic()
+# Res_Klrg1_neg_CD8_neater <- neater(
+#   # dataset = facs_data_df_CD8_Res_Klrg1_neg_Neg, 
+#   dataset = facs_data_df_CD8_Res_Klrg1_neg,
+#   newSamples = new_synthetic_CD8_Res_Klrg1_neg, 
+#   classAttr = "third_gate", 
+#   iterations = 5)
+# toc()
+# 
+# # Res_Klrg1_neg_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Res_Klrg1_neg_CD8_neater_2020_10_07.tsv"), delim = "\t")
+# 
+# Res_Klrg1_neg_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Res_Klrg1_neg_CD8_neater_2020_10_09.tsv"), delim = "\t")
+# 
+# 
+# 
+# facs_data_df_CD8_Eff_Klrg1 <- facs_data_df_CD8 %>% 
+#   dplyr::filter(third_gate %in% c("Eff_Klrg1_pos", "Eff_Klrg1_neg")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# facs_data_df_CD8_Eff_Klrg1_pos <- facs_data_df_CD8 %>% 
+#   dplyr::filter(third_gate %in% c("Eff_Klrg1_pos")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# set.seed(123)
+# new_synthetic_CD8_Eff_Klrg1_pos <- facs_data_df_CD8_Eff_Klrg1_pos %>% 
+#   imbalance::rwo(numInstances = 1000000, classAttr = "third_gate")
+# 
+# # 9451.815 sec elapsed
+# # "172607 samples filtered by NEATER"
+# tic()
+# Eff_Klrg1_pos_CD8_neater <- neater(
+#   # dataset = facs_data_df_CD8_Eff_Klrg1, 
+#   dataset = facs_data_df_CD8_Eff_Klrg1_pos, 
+#   newSamples = new_synthetic_CD8_Eff_Klrg1_pos, 
+#   classAttr = "third_gate", 
+#   iterations = 5)
+# toc()
+# 
+# # Eff_Klrg1_pos_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Eff_Klrg1_pos_CD8_neater_2020_10_07.tsv"), delim = "\t")
+# 
+# Eff_Klrg1_pos_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Eff_Klrg1_pos_CD8_neater_2020_10_09.tsv"), delim = "\t")
+# 
+# 
+# 
+# 
+# 
+# facs_data_df_CD8_Eff_Klrg1_neg_Neg <- facs_data_df_CD8 %>% 
+#   dplyr::filter(third_gate %in% c("Eff_Klrg1_neg", "Neg")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# facs_data_df_CD8_Eff_Klrg1_neg <- facs_data_df_CD8 %>% 
+#   dplyr::filter(third_gate %in% c("Eff_Klrg1_neg")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# set.seed(123)
+# new_synthetic_CD8_Eff_Klrg1_neg <- facs_data_df_CD8_Eff_Klrg1_neg %>% 
+#   imbalance::rwo(numInstances = 1000000, classAttr = "third_gate")
+# 
+# tic()
+# Eff_Klrg1_neg_CD8_neater <- neater(
+#   # dataset = facs_data_df_CD8_Eff_Klrg1_neg_Neg, 
+#   dataset = facs_data_df_CD8_Eff_Klrg1_neg, 
+#   newSamples = new_synthetic_CD8_Eff_Klrg1_neg, 
+#   classAttr = "third_gate", 
+#   iterations = 5)
+# toc()
+# 
+# # Eff_Klrg1_neg_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Eff_Klrg1_neg_CD8_neater_2020_10_07.tsv"), delim = "\t")
+# 
+# Eff_Klrg1_neg_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Eff_Klrg1_neg_CD8_neater_2020_10_09.tsv"), delim = "\t")
+# 
+# 
+# 
+# 
+# 
+# 
+# facs_data_df_CD8_Naive_Klrg1 <- facs_data_df_CD8 %>% 
+#   dplyr::filter(third_gate %in% c("Naive_Klrg1_pos", "Naive_Klrg1_neg")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# facs_data_df_CD8_Naive_Klrg1_pos <- facs_data_df_CD8 %>% 
+#   dplyr::filter(third_gate %in% c("Naive_Klrg1_pos")) %>% 
+#   dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# 
+# set.seed(123)
+# new_synthetic_CD8_Naive_Klrg1_pos <- facs_data_df_CD8_Naive_Klrg1_pos %>% 
+#   imbalance::rwo(numInstances = 1000000, classAttr = "third_gate")
+# 
+# # 31986.601 sec elapsed
+# # "229044 samples filtered by NEATER"
+# 
+# tic()
+# Naive_Klrg1_pos_CD8_neater <- neater(
+#   # dataset = facs_data_df_CD8_Naive_Klrg1,
+#   dataset = facs_data_df_CD8_Naive_Klrg1_pos,
+#   newSamples = new_synthetic_CD8_Naive_Klrg1_pos, 
+#   classAttr = "third_gate", 
+#   iterations = 5)
+# toc()
+# 
+# # Naive_Klrg1_pos_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Naive_Klrg1_pos_CD8_neater_2020_10_07.tsv"), delim = "\t")
+# 
+# Naive_Klrg1_pos_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Naive_Klrg1_pos_CD8_neater_2020_10_09.tsv"), delim = "\t")
+# 
+# 
+# 
+# # 
+# # tic()
+# # Res_Klrg1_pos_CD8_neater <- neater(dataset = facs_data_df_CD8_Res_Klrg1_pos, 
+# #                                newSamples = new_synthetic_CD8_Res_Klrg1_pos, 
+# #                                classAttr = "third_gate", 
+# #                                iterations = 5)
+# # toc()
+# # 
+# # Res_Klrg1_pos_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Res_Klrg1_pos_CD8_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# # 
+# # tic()
+# # Res_Klrg1_neg_CD8_neater <- neater(dataset = facs_data_df_CD8_Res_Klrg1_neg, 
+# #                                newSamples = new_synthetic_CD8_Res_Klrg1_neg, 
+# #                                classAttr = "third_gate", 
+# #                                iterations = 5)
+# # toc()
+# # 
+# # Res_Klrg1_neg_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Res_Klrg1_neg_CD8_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# # 
+# # tic()
+# # Eff_Klrg1_pos_CD8_neater <- neater(dataset = facs_data_df_CD8_Eff_Klrg1_pos, 
+# #                                newSamples = new_synthetic_CD8_Eff_Klrg1_pos, 
+# #                                classAttr = "third_gate", 
+# #                                iterations = 5)
+# # toc()
+# # 
+# # Eff_Klrg1_pos_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Eff_Klrg1_pos_CD8_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# # 
+# # tic()
+# # Eff_Klrg1_neg_CD8_neater <- neater(dataset = facs_data_df_CD8_Eff_Klrg1_neg, 
+# #                                newSamples = new_synthetic_CD8_Eff_Klrg1_neg, 
+# #                                classAttr = "third_gate", 
+# #                                iterations = 5)
+# # toc()
+# # 
+# # Eff_Klrg1_neg_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Eff_Klrg1_neg_CD8_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# # 
+# # tic()
+# # Naive_Klrg1_pos_CD8_neater <- neater(dataset = facs_data_df_CD8_Naive_Klrg1_pos, 
+# #                                newSamples = new_synthetic_CD8_Naive_Klrg1_pos, 
+# #                                classAttr = "third_gate", 
+# #                                iterations = 5)
+# # toc()
+# # 
+# # Naive_Klrg1_pos_CD8_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Naive_Klrg1_pos_CD8_neater_2020_10_05.tsv"), delim = "\t")
+# 
+# 
+# # Undersample cell types
+# # create balanced cell types df with 100,000 events each
+# 
+# # Res_Klrg1_pos_CD8_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Res_Klrg1_pos_CD8_neater_2020_10_07.tsv"), delim = "\t")
+# 
+# Res_Klrg1_pos_CD8_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Res_Klrg1_pos_CD8_neater_2020_10_09.tsv"), delim = "\t")
+# 
+# # Res_Klrg1_neg_CD8_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Res_Klrg1_neg_CD8_neater_2020_10_07.tsv"), delim = "\t")
+# 
+# Res_Klrg1_neg_CD8_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Res_Klrg1_neg_CD8_neater_2020_10_09.tsv"), delim = "\t")
+# 
+# # Eff_Klrg1_pos_CD8_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Eff_Klrg1_pos_CD8_neater_2020_10_07.tsv"), delim = "\t")
+# 
+# Eff_Klrg1_pos_CD8_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Eff_Klrg1_pos_CD8_neater_2020_10_09.tsv"), delim = "\t")
+# 
+# # Eff_Klrg1_neg_CD8_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Eff_Klrg1_neg_CD8_neater_2020_10_07.tsv"), delim = "\t")
+# 
+# Eff_Klrg1_neg_CD8_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Eff_Klrg1_neg_CD8_neater_2020_10_09.tsv"), delim = "\t")
+# 
+# # Naive_Klrg1_pos_CD8_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Naive_Klrg1_pos_CD8_neater_2020_10_07.tsv"), delim = "\t")
+# 
+# Naive_Klrg1_pos_CD8_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Naive_Klrg1_pos_CD8_neater_2020_10_09.tsv"), delim = "\t")
+# 
+# facs_data_df_CD8_list <- facs_data_df_CD8 %>% split(f = .$third_gate)
+# 
+# n_cells <- 200000
+# 
+# set.seed(123)
+# facs_data_df_CD8_list$Naive_Klrg1_neg <- facs_data_df_CD8_list$Naive_Klrg1_neg %>% dplyr::slice(sample(n_cells))
+# 
+# set.seed(123)
+# # facs_data_df_CD8_list$Res_Klrg1_neg <- facs_data_df_CD8_list$Res_Klrg1_neg %>% dplyr::slice(sample(n_cells))
+# 
+# set.seed(123)
+# # facs_data_df_CD8_list$Eff_Klrg1_neg <- facs_data_df_CD8_list$Eff_Klrg1_neg %>% dplyr::slice(sample(n_cells))
+# 
+# set.seed(123)
+# facs_data_df_CD8_list$Neg <- facs_data_df_CD8_list$Neg %>% dplyr::slice(sample(n_cells))
+# 
+# set.seed(123)
+# facs_data_df_CD8_list$Eff_Klrg1_neg <- Eff_Klrg1_neg_CD8_neater %>% dplyr::slice(sample(n_cells-nrow(facs_data_df_CD8_list$Eff_Klrg1_neg))) %>% bind_rows(facs_data_df_CD8_list$Eff_Klrg1_neg)
+# 
+# set.seed(123)
+# facs_data_df_CD8_list$Eff_Klrg1_pos <- Eff_Klrg1_pos_CD8_neater %>% dplyr::slice(sample(n_cells-nrow(facs_data_df_CD8_list$Eff_Klrg1_pos))) %>% bind_rows(facs_data_df_CD8_list$Eff_Klrg1_pos)
+# 
+# set.seed(123)
+# facs_data_df_CD8_list$Naive_Klrg1_pos <- Naive_Klrg1_pos_CD8_neater %>% dplyr::slice(sample(n_cells-nrow(facs_data_df_CD8_list$Naive_Klrg1_pos))) %>% bind_rows(facs_data_df_CD8_list$Naive_Klrg1_pos)
+# 
+# set.seed(123)
+# facs_data_df_CD8_list$Res_Klrg1_neg <- Res_Klrg1_neg_CD8_neater %>% dplyr::slice(sample(n_cells-nrow(facs_data_df_CD8_list$Res_Klrg1_neg))) %>% bind_rows(facs_data_df_CD8_list$Res_Klrg1_neg)
+# 
+# set.seed(123)
+# facs_data_df_CD8_list$Res_Klrg1_pos <- Res_Klrg1_pos_CD8_neater %>% dplyr::slice(sample(n_cells-nrow(facs_data_df_CD8_list$Res_Klrg1_pos))) %>% bind_rows(facs_data_df_CD8_list$Res_Klrg1_pos)
+# 
+# facs_data_df_CD8 <- facs_data_df_CD8_list %>% bind_rows(.id = "third_gate")
+# 
+# facs_data_df_CD8 <- facs_data_df_CD8 %>% dplyr::select(-c(Time, cell_type, first_gate, second_gate))
+# 
+# # facs_data_df_CD8 %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/balanced_data_7_classes_third_gate_CD8_2020_10_09.tsv"), delim = "\t")
+# 
+# facs_data_df_CD8 %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/balanced_data_7_classes_third_gate_CD8_2020_10_10.tsv"), delim = "\t")
+# 
+# # sort data
+# reseed()
+# facs_data_df_CD8 <- facs_data_df_CD8 %>% dplyr::slice(sample(nrow(facs_data_df_CD8)))
+# 
+# # Set train and test dfs
+# train_index_CD8 <- sample(1:nrow(facs_data_df_CD8), 0.7 * nrow(facs_data_df_CD8))
+# 
+# # train_df_CD8 <- facs_data_df_CD8[train_index_CD8, ] %>% dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# train_df_CD8 <- facs_data_df_CD8[train_index_CD8, ] %>% dplyr::select(-c("File", "File_scattered"))
+# 
+# # test_df_CD8 <- facs_data_df_CD8[-train_index_CD8, ] %>% dplyr::select(-c("File", "File_scattered", "Time", "cell_type", "first_gate", "second_gate"))
+# test_df_CD8 <- facs_data_df_CD8[-train_index_CD8, ] %>% dplyr::select(-c("File", "File_scattered"))
+# 
+# rf_train_CD8 <- train_df_CD8 %>% mutate(third_gate = third_gate %>% factor(levels = c("Eff_Klrg1_neg", "Eff_Klrg1_pos", "Res_Klrg1_neg", "Res_Klrg1_pos", "Naive_Klrg1_neg", "Naive_Klrg1_pos", "Neg")))
+```
+
+
+
+# XGBoost for CD8+ cells
+```{r}
+library(xgboost)
+
+# bn_results <- train_df_step_CD8 %>% dplyr::select_if(is.numeric) %>% dplyr::select(-c(Time, File, File_scattered)) %>% purrr::map(bestNormalize::bestNormalize)
+# bn_results %>% saveRDS(file = "~/PRIMUS/home/trufenc/bn_results_train_df_CD8_2020_11_05.rds")
+
+# train_df_CD8 <- train_df_step_CD8
+
+train_df_CD8 <- train_df_step_CD8 %>% 
+  mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %in% c("Naive", "Neg"), true = "Not_Res_Eff", false = Res_Eff_Naive_gate))
+
+# train_df_CD8 <- train_df_step_CD8 %>% dplyr::select_if(is.numeric) %>% dplyr::select(-c(Time, File, File_scattered)) %>% purrr::map(bestNormalize::orderNorm)
+# train_df_CD8 <- purrr::map(seq_along(train_df_CD8), function(i) train_df_CD8[[i]]$x.t) %>% purrr::set_names(colnames(train_df_step_CD8)[1:18]) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% bind_cols(train_df_step_CD8 %>% dplyr::select(c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Res_Eff_Naive_gate", "Klrg1_gate")))
+
+# val_df_CD8 <- val_df_step_CD8
+
+val_df_CD8 <- val_df_step_CD8 %>% 
+  mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %in% c("Naive", "Neg"), true = "Not_Res_Eff", false = Res_Eff_Naive_gate))
+
+# val_df_CD8 <- val_df_step_CD8 %>% dplyr::select_if(is.numeric) %>% dplyr::select(-c(Time, File, File_scattered)) %>% purrr::map(bestNormalize::orderNorm)
+# val_df_CD8 <- purrr::map(seq_along(val_df_CD8), function(i) val_df_CD8[[i]]$x.t) %>% purrr::set_names(colnames(val_df_step_CD8)[1:18]) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% bind_cols(val_df_step_CD8 %>% dplyr::select(c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Res_Eff_Naive_gate", "Klrg1_gate")))
+
+CD8_levels <- train_df_CD8$Res_Eff_Naive_gate %>% unique()
+
+n_classes <- length(CD8_levels)
+
+classes_number <- data.frame(
+  classes = CD8_levels,
+  Number = 1:length(CD8_levels)
+)
+
+val_label_CD8 <- val_df_CD8 %>%
+  dplyr::select(Res_Eff_Naive_gate) %>%
+  pull() %>%
+  str_replace(pattern = "Eff", replacement = "1") %>%
+  str_replace(pattern = "Res", replacement = "2") %>%
+  str_replace(pattern = "Not_2_1", replacement = "3") %>%
+  # str_replace(pattern = "Res", replacement = "2") %>%
+  # str_replace(pattern = "Naive", replacement = "3") %>%
+  # str_replace(pattern = "Neg", replacement = "4") %>%
+  as.numeric() %>%
+  "-"(1)
+
+train_label_CD8 <- train_df_CD8 %>%
+  dplyr::select(Res_Eff_Naive_gate) %>%
+  pull() %>%
+  str_replace(pattern = "Eff", replacement = "1") %>%
+  str_replace(pattern = "Res", replacement = "2") %>%
+  str_replace(pattern = "Not_2_1", replacement = "3") %>%
+  # str_replace(pattern = "Res", replacement = "2") %>%
+  # str_replace(pattern = "Naive", replacement = "3") %>%
+  # str_replace(pattern = "Neg", replacement = "4") %>%
+  as.numeric() %>%
+  "-"(1)
+
+train_matrix_CD8 <- xgb.DMatrix(
+  data = train_df_CD8 %>%  
+    dplyr::select(-c(Time, File, File_scattered, cell_type, first_gate, second_gate, Res_Eff_Naive_gate, Klrg1_gate)) %>%
+    # dplyr::select(c("PE.A", "APC.Cy7.A")) %>% 
+    # dplyr::select(-c(third_gate)) %>%
+    as.matrix(),
+  label = train_label_CD8
+  )
+
+val_matrix_CD8 <- xgb.DMatrix(
+  data = val_df_CD8 %>%  
+    dplyr::select(-c(Time, File, File_scattered, cell_type, first_gate, second_gate, Res_Eff_Naive_gate, Klrg1_gate)) %>%
+    # dplyr::select(c("PE.A", "APC.Cy7.A")) %>% 
+    # dplyr::select(-c(third_gate)) %>%
+    as.matrix(),
+  label = val_label_CD8
+  )
+
+k_fold <- 10
+
+n_round <- 100
+
+# xgb_params <- list(
+#   booster = "gbtree",
+#   # booster = "dart",
+#   objective = "multi:softprob",
+#   eta = 0.1,
+#   gamma = 6.22,
+#   max_depth = 10,
+#   min_child_weight = 9.11,
+#   subsample = 0.991,
+#   colsample_bytree = 0.955,
+#   num_class = n_classes,
+#   nthread = 50
+# )
+
+# xgb_params <- list(
+#   booster = "gbtree",
+#   # booster = "dart",
+#   objective = "multi:softprob",
+#   eta = 0.3,
+#   alpha = 0,
+#   gamma = 0,
+#   max_depth = 1,
+#   min_child_weight = 3,
+#   subsample = .7,
+#   colsample_bytree = 1,
+#   num_class = n_classes,
+#   nthread = 50
+# )
+
+xgb_params <- list(
+  booster = "gbtree",
+  # booster = "dart",
+  objective = "multi:softprob",
+  eta = 0.796,
+  alpha = 0.988,
+  gamma = 3.31,
+  max_depth = 3,
+  min_child_weight = 4.36,
+  subsample = 0.978,
+  colsample_bytree = 0.907,
+  num_class = n_classes,
+  nthread = 6
+)
+
+tic()
+xgb_cv_model_CD8 <- xgb.cv(
+  params = xgb_params,
+  data = train_matrix_CD8,
+  nrounds = n_round,
+  nfold = k_fold,
+  showsd = T,
+  stratified = T,
+  print_every_n = 1,
+  early_stopping_rounds = 10,
+  maximize = F,
+  prediction = TRUE
+)
+toc()
+
+xgb_cv_model_CD8$best_iteration
+
+xgb_cv_model_CD8$evaluation_log %>% dplyr::filter(iter == xgb_cv_model_CD8$best_iteration) %>% dplyr::select(test_merror_mean) %>% pull
+
+xgb_cv_model_CD8$evaluation_log %>% mutate(diff = test_merror_mean - train_merror_mean) %>% View()
+
+xgb_cv_model_CD8$evaluation_log %>% 
+  ggplot(aes(x = iter)) +
+  geom_line(aes(y = train_merror_mean, colour = "train")) + 
+  geom_line(aes(y = test_merror_mean, colour = "test"))
+
+# first default - model training
+tic()
+xgb_CD8 <- xgb.train(
+  params = xgb_params, 
+  data = train_matrix_CD8, 
+  nrounds = xgb_cv_model_CD8$best_iteration,
+  # nrounds = 23,
+  watchlist = list(val = val_matrix_CD8, train = train_matrix_CD8),
+  print_every_n = 1, 
+  early_stopping_rounds = 10, 
+  maximize = F , 
+  eval_metric = "merror"
+  )
+toc()
+
+# xgb_CD8 %>% saveRDS(paste0(source_path, "home/trufenc/xgboost_model_step_CD8_2020_10_12.rds"))
+
+xgb_pred <- predict(xgb_CD8, val_matrix_CD8)
+
+val_prediction_df <- matrix(
+  data = xgb_pred,
+  nrow = n_classes,
+  ncol = length(xgb_pred) / n_classes
+  ) %>%
+  t() %>%
+  data.frame()
+
+val_prediction <- val_prediction_df %>%
+  mutate(
+    label = val_label_CD8 %>% as.numeric() + 1,
+    max_prob = max.col(., "last")
+  )
+
+library(caret)
+# confusion_matrix <- confusionMatrix(factor(val_prediction$label), factor(val_prediction$max_prob, levels = c(1, 2, 3, 4)))
+confusion_matrix <- confusionMatrix(factor(val_prediction$label), factor(val_prediction$max_prob, levels = c(1, 2, 3)))
+
+#view variable importance plot
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix_CD8), model = xgb_CD8)
+
+gp = xgb.ggplot.importance(importance_matrix = importance_matrix)
+print(gp)
+```
+
+
+
+
+# independent dataset to test
+# https://github.com/RGLab/flowCore/issues/108
+```{r}
+test_df_step_CD8 <- test_facs_data_df %>% dplyr::filter(first_gate != "not_live") %>% dplyr::filter(second_gate == "CD8+_cells")
+
+test_CD8_gate_table <- test_df_step_CD8 %>% group_by(Res_Eff_Naive_gate) %>% tally()
+
+# test_df_CD8 <- test_df_step_CD8
+
+test_df_CD8 <- test_df_step_CD8 %>% 
+  mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %in% c("Naive", "Neg"), true = "Not_Res_Eff", false = Res_Eff_Naive_gate))
+
+# test_df_CD8 <- test_df_step_CD8 %>% dplyr::select_if(is.numeric) %>% dplyr::select(-c(Time, File, File_scattered)) %>% purrr::map(bestNormalize::orderNorm)
+# test_df_CD8 <- purrr::map(seq_along(test_df_CD8), function(i) test_df_CD8[[i]]$x.t) %>% purrr::set_names(colnames(test_df_step_CD8)[1:18]) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% bind_cols(test_df_step_CD8 %>% dplyr::select(c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Res_Eff_Naive_gate", "Klrg1_gate")))
+
+
+CD8_levels <- test_df_CD8$Res_Eff_Naive_gate %>% unique()
+
+n_classes <- length(CD8_levels)
+
+test_label <- test_df_CD8 %>%
+  dplyr::select(Res_Eff_Naive_gate) %>%
+  pull() %>%
+  str_replace(pattern = "Eff", replacement = "1") %>%
+  str_replace(pattern = "Res", replacement = "2") %>%
+  str_replace(pattern = "Not_2_1", replacement = "3") %>%
+  # str_replace(pattern = "Res", replacement = "2") %>%
+  # str_replace(pattern = "Naive", replacement = "3") %>%
+  # str_replace(pattern = "Neg", replacement = "4") %>%
+  as.numeric() %>%
+  "-"(1)
+
+test_matrix <- xgb.DMatrix(
+  # data = EmbedSOM_results_CD8$weights_df[-test_indices, ] %>%
+  # data = test_EmbedSOM_results_CD8$weights_df %>%  
+  data = test_df_CD8 %>%    
+    dplyr::select(-c(Time, File, File_scattered, cell_type, first_gate, second_gate, Res_Eff_Naive_gate, Klrg1_gate)) %>%
+    # dplyr::select(-c(first_gate)) %>%
+    as.matrix(),
+  label = test_label
+  )
+
+xgb_pred_CD8 <- predict(xgb_CD8, test_matrix)
+
+test_prediction_df <- matrix(
+  data = xgb_pred_CD8,
+  nrow = n_classes,
+  ncol = length(xgb_pred_CD8) / n_classes
+  ) %>%
+  t() %>%
+  data.frame()
+
+test_prediction <- test_prediction_df %>%
+  mutate(
+    label = test_label %>% as.numeric() + 1,
+    max_prob = max.col(., "last")
+  )
+
+library(caret)
+# test_confusion_matrix <- confusionMatrix(factor(test_prediction$label), factor(test_prediction$max_prob, levels = c(1, 2, 3, 4)))
+test_confusion_matrix <- confusionMatrix(factor(test_prediction$label), factor(test_prediction$max_prob, levels = c(1, 2, 3)))
+
+#view variable importance plot
+test_importance_matrix <- xgb.importance(feature_names = colnames(train_matrix_CD8), model = xgb_CD8)
+
+gp = xgb.ggplot.importance(importance_matrix = importance_matrix)
+print(gp)
+```
+```{r}
+train_df_CD8 %>% filter(Res_Eff_Naive_gate == "Not_Res_Eff")
+                    
+```
+
+
+
+
+
+
+# Random forest
+# http://search.r-project.org/library/spm/html/rgcv.html
+```{r}
+library(ranger)
+library(spm)
+
+rf_train_CD8 <- train_df_step_CD8 %>% dplyr::select(-c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Klrg1_gate")) %>% mutate(Res_Eff_Naive_gate = Res_Eff_Naive_gate %>% factor())
+
+rf_val_CD8 <- val_df_step_CD8 %>% dplyr::select(-c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Klrg1_gate")) %>% mutate(Res_Eff_Naive_gate = Res_Eff_Naive_gate %>% factor())
+
+set.seed(123)
+tic()
+rf_model_CD8 <- ranger(formula = Res_Eff_Naive_gate ~ ., data = rf_train_CD8, num.threads = 50, num.trees = 500, mtry = 4, max.depth = 0, min.node.size = 1, splitrule = "gini")
+# rf_model_CD8 <- ranger(formula = Res_Eff_Naive_gate ~ ., data = rf_train_CD8, num.threads = 50, num.trees = 500, mtry = 4, max.depth = 0, min.node.size = 1, splitrule = "extratrees")
+toc()
+
+confusionMatrix(rf_train_CD8$Res_Eff_Naive_gate, rf_model_CD8$predictions)
+
+rf_pred_CD8 <- predict(rf_model_CD8, rf_val_CD8 %>% dplyr::select(-Res_Eff_Naive_gate))
+
+confusionMatrix(rf_val_CD8$Res_Eff_Naive_gate, rf_pred_CD8$predictions)
+
+# tic()
+# rf_cv_model_CD8 <- rgcv(
+#   trainx = rf_train_CD8 %>% dplyr::select(-c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Res_Eff_Naive_gate", "Klrg1_gate")),
+#   trainy = rf_train_CD8$Res_Eff_Naive_gate,
+#   cv.fold = 10,
+#   mtry = 4,
+#   num.trees = 500,
+#   min.node.size = 1,
+#   max.depth = 0, 
+#   num.threads = 50,
+#   verbose = TRUE)
+# toc()
+# 
+# tic()
+# rf_cv_model_CD8 <- rgcv(
+#   trainx = rf_train_CD8 %>% dplyr::select(-c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Res_Eff_Naive_gate", "Klrg1_gate")),
+#   trainy = rf_train_CD8$Res_Eff_Naive_gate,
+#   cv.fold = 10,
+#   mtry = 4,
+#   num.trees = 500,
+#   min.node.size = 1,
+#   max.depth = 0, 
+#   num.threads = 50,
+#   verbose = TRUE)
+# toc()
+```
+
+```{r}
+library(fastAdaboost)
+library(adabag)
+
+ada_cv_model_CD8 <- boosting.cv(formula = Res_Eff_Naive_gate ~ .,
+                                data = rf_train_CD8,
+                                v = 10, 
+                                boos = TRUE, 
+                                mfinal = 100,
+                                coeflearn = "Breiman",
+                                control = rpart.control(minsplit = 20, 
+                                                        minbucket = round(minsplit/3), 
+                                                        cp = 0.01, 
+                                                        maxcompete = 4, 
+                                                        maxsurrogate = 5, 
+                                                        usesurrogate = 2, 
+                                                        xval = 10,
+                                                        surrogatestyle = 0, 
+                                                        maxdepth = 30), 
+                                par = TRUE)
+
+
+adaboost_model_CD8 <- adaboost(Res_Eff_Naive_gate ~ ., rf_train_CD8, 10)
+
+ada_pred <- predict(adaboost_model_CD8, newdata = rf_train_CD8)
+
+print(ada_pred$error)
+```
+
+
+# https://stats.stackexchange.com/questions/181/how-to-choose-the-number-of-hidden-layers-and-nodes-in-a-feedforward-neural-netw
+# https://towardsdatascience.com/beginners-ask-how-many-hidden-layers-neurons-to-use-in-artificial-neural-networks-51466afa0d3e
+```{r}
+library(h2o)
+
+train_df_CD8 <- train_df_step_CD8 %>% dplyr::select_if(is.numeric) %>% dplyr::select(-c(Time, File, File_scattered)) %>% purrr::map(bestNormalize::orderNorm)
+train_df_CD8 <- purrr::map(seq_along(train_df_CD8), function(i) train_df_CD8[[i]]$x.t) %>% purrr::set_names(colnames(train_df_step_CD8)[1:18]) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% bind_cols(train_df_step_CD8 %>% dplyr::select(c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Res_Eff_Naive_gate", "Klrg1_gate")))
+
+dl_train_CD8 <- train_df_step_CD8 %>% 
+  mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %in% c("Naive", "Neg"), true = "Not_Res_Eff", false = Res_Eff_Naive_gate)) %>% 
+  dplyr::select(-c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Klrg1_gate")) %>% 
+  split(f = .$Res_Eff_Naive_gate) %>% 
+  purrr::map(dplyr::slice, sample(10000)) %>% 
+  bind_rows() %>% 
+  mutate(Res_Eff_Naive_gate = Res_Eff_Naive_gate %>% factor())
+
+val_df_CD8 <- val_df_step_CD8 %>% dplyr::select_if(is.numeric) %>% dplyr::select(-c(Time, File, File_scattered)) %>% purrr::map(bestNormalize::orderNorm)
+val_df_CD8 <- purrr::map(seq_along(val_df_CD8), function(i) val_df_CD8[[i]]$x.t) %>% purrr::set_names(colnames(val_df_step_CD8)[1:18]) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% bind_cols(val_df_step_CD8 %>% dplyr::select(c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Res_Eff_Naive_gate", "Klrg1_gate")))
+
+dl_val_CD8 <- val_df_step_CD8 %>% 
+   mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %in% c("Naive", "Neg"), true = "Not_Res_Eff", false = Res_Eff_Naive_gate)) %>% 
+  dplyr::select(-c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Klrg1_gate")) %>% 
+  split(f = .$Res_Eff_Naive_gate) %>% 
+  purrr::map(dplyr::slice, sample(2000)) %>% 
+  bind_rows() %>% 
+  mutate(Res_Eff_Naive_gate = Res_Eff_Naive_gate %>% factor())
+
+test_df_CD8 <- test_df_step_CD8 %>% dplyr::select_if(is.numeric) %>% dplyr::select(-c(Time, File, File_scattered)) %>% purrr::map(bestNormalize::orderNorm)
+test_df_CD8 <- purrr::map(seq_along(test_df_CD8), function(i) test_df_CD8[[i]]$x.t) %>% purrr::set_names(colnames(test_df_step_CD8)[1:18]) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% bind_cols(test_df_step_CD8 %>% dplyr::select(c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Res_Eff_Naive_gate", "Klrg1_gate")))
+
+dl_test_CD8 <- test_df_step_CD8 %>% 
+   mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %in% c("Naive", "Neg"), true = "Not_Res_Eff", false = Res_Eff_Naive_gate)) %>% 
+  dplyr::select(-c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Klrg1_gate")) %>% 
+  split(f = .$Res_Eff_Naive_gate) %>% 
+  bind_rows() %>% 
+  mutate(Res_Eff_Naive_gate = Res_Eff_Naive_gate %>% factor())
+
+h2o.init(nthreads = 6)
+
+dl_train_CD8_hf <- as.h2o(dl_train_CD8)
+
+dl_train_CD8_dl <- h2o.deeplearning(
+  x = 1:18, y = 19, 
+  training_frame = dl_train_CD8_hf, 
+  seed = 123, 
+  nfolds = 10, 
+  hidden = c(10, 10, 10, 10, 10),
+  balance_classes = TRUE,
+  verbose = TRUE
+  )
+
+# now make a prediction
+dl_pred_CD8 <- h2o.predict(dl_train_CD8_dl, dl_train_CD8_hf)
+
+dl_pred_CD8 <- as.data.frame(dl_pred_CD8)
+
+confusionMatrix(dl_train_CD8$Res_Eff_Naive_gate, dl_pred_CD8$predict)
+
+dl_val_CD8_hf <- as.h2o(dl_val_CD8)
+
+val_dl_pred_CD8 <- h2o.predict(dl_train_CD8_dl, dl_val_CD8_hf)
+
+val_dl_pred_CD8 <- as.data.frame(val_dl_pred_CD8)
+
+# confusionMatrix(dl_val_CD8$Res_Eff_Naive_gate, factor(val_dl_pred_CD8$predict, levels = c("Eff", "Naive", "Neg", "Res")))
+confusionMatrix(dl_val_CD8$Res_Eff_Naive_gate, factor(val_dl_pred_CD8$predict, levels = c("Eff", "Res", "Not_Res_Eff")))
+
+dl_test_CD8_hf <- as.h2o(dl_test_CD8)
+
+test_dl_pred_CD8 <- h2o.predict(dl_train_CD8_dl, dl_test_CD8_hf)
+
+test_dl_pred_CD8 <- as.data.frame(test_dl_pred_CD8)
+
+confusionMatrix(dl_test_CD8$Res_Eff_Naive_gate, factor(test_dl_pred_CD8$predict, levels = c("Eff", "Res", "Not_Res_Eff")))
+```
+
+
+```{r}
+library(h2o4gpu)
+library(reticulate) 
+use_virtualenv("/home/carlos/anaconda3/envs/h204gpu/lib/python3.6/site-packages/h2o4gpu") 
+
+
+
+dl_train_CD8 <- train_df_step_CD8 %>% 
+   mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %in% c("Naive", "Neg"), true = "Not_Res_Eff", false = Res_Eff_Naive_gate)) %>% 
+  dplyr::select(-c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Klrg1_gate")) %>% 
+  mutate(Res_Eff_Naive_gate = Res_Eff_Naive_gate %>% factor())
+
+dl_val_CD8 <- val_df_step_CD8 %>% 
+   mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %in% c("Naive", "Neg"), true = "Not_Res_Eff", false = Res_Eff_Naive_gate)) %>% 
+  dplyr::select(-c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Klrg1_gate")) %>%
+  mutate(Res_Eff_Naive_gate = Res_Eff_Naive_gate %>% factor())
+
+dl_test_CD8 <- test_df_step_CD8 %>% 
+   mutate(Res_Eff_Naive_gate = if_else(Res_Eff_Naive_gate %in% c("Naive", "Neg"), true = "Not_Res_Eff", false = Res_Eff_Naive_gate)) %>% 
+  dplyr::select(-c("Time", "File", "File_scattered", "cell_type", "first_gate", "second_gate", "Klrg1_gate")) %>%
+  mutate(Res_Eff_Naive_gate = Res_Eff_Naive_gate %>% factor())
+
+x_train <- dl_train_CD8 %>% dplyr::select(-c(Res_Eff_Naive_gate))
+y_train <- dl_train_CD8 %>% dplyr::select(Res_Eff_Naive_gate)
+
+x_test <- dl_val_CD8 %>% dplyr::select(-c(Res_Eff_Naive_gate))
+y_test <- dl_val_CD8 %>% dplyr::select(Res_Eff_Naive_gate)
+
+# Train two different regression models
+model_gbr <- h2o4gpu.gradient_boosting_classifier() %>% fit(x_train, y_train)
+model_enr <- h2o4gpu.elastic_net_classifier() %>% fit(x_train, y_train)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+path_to_control_files_1 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2018/CCP_cohorts_2018_12/2018_12_27_C067/2018_12_27_PA/C067_cA1556_gates")
+
+path_to_control_files_2 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90692")
+
+path_to_control_files_3 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_c90695")
+
+path_to_control_files_4 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_06/2019_06_10_C088/C088_PA_c89141_gates")
+
+path_to_control_files_5 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_06/2019_06_10_C088/C088_PA_c90043_gates")
+
+path_to_ko_files_1 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8038")
+
+path_to_ko_files_2 <- paste0(source_path, "data/83_IMPC_DATA/Immunology/CCP_Phenotyping_Immunology_Data_JB/CCP_cohorts_2019/CCP_cohorts_2019_10/2019_10_29_C108/2019_10_29_PA/gates_tgE8040")
+```
+
+```{r}
+path_to_files <- list(path_to_control_files_1,
+                      path_to_control_files_2,
+                      path_to_control_files_3,
+                      path_to_control_files_4,
+                      path_to_control_files_5)
+
+path_to_ko_files <- list(path_to_ko_files_1,
+                           path_to_ko_files_2)
+```
+
+```{r files}
+files <- path_to_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+ko_files <- path_to_ko_files %>% purrr::map(list.files, pattern = ".fcs", full.names = TRUE)
+```
+
+```{r file_names}
+file_names <- path_to_files %>% purrr::map(list.files, pattern = ".fcs")
+ko_files_names <- path_to_ko_files %>% purrr::map(list.files, pattern = ".fcs")
+```
+
+```{r}
+panel_A_classes <- c(
+  "_clog\\+.fcs",
+  "_clog\\-_cells\\-.fcs",
+  "_S1\\-.fcs",
+  "_dead.fcs",
+  "_S2\\-.fcs",
+  "gdTCR_Eff_Klrg1\\-.fcs",
+  "gdTCR_Eff_Klrg1\\+.fcs",
+  "gdTCR_Res_Klrg1\\-.fcs",
+  "gdTCR_Res_Klrg1\\+.fcs",
+  "gdTCR_neg_Klrg1\\-.fcs",
+  "gdTCR_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  #"_CD5\\+\\-.fcs",
+  #"_CD4\\+ NKT\\+ or CD4\\- NKT\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Tregs_Eff_Klrg1\\-.fcs",
+  "Tregs_Eff_Klrg1\\+.fcs",
+  "Tregs_Res_Klrg1\\-.fcs",
+  "Tregs_Res_Klrg1\\+.fcs",
+  "Tregs_neg_Klrg1\\-.fcs",
+  "Tregs_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_1 <- purrr::map(seq_along(panel_A_classes), function(i) files[[1]] %>% str_which(pattern = panel_A_classes[i])) %>% unlist()
+files_to_load_1 <- files[[1]][indices_1]
+files_to_load_names_1 <- file_names[[1]][indices_1]
+```
+
+# Second class assignment, more refined - gates_c90692
+```{r}
+panel_A_classes_2 <- c(
+  "clog\\-\\-.fcs",
+  "cells\\-.fcs",
+  "S1\\-.fcs",
+  "dead.fcs",
+  "S2\\-.fcs",
+  "gd_Eff_Klrg1\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+.fcs",
+  "gd_Res_Klrg1\\+\\-.fcs",
+  "gd_Res_Klrg1\\+.fcs",
+  "gd_neg_Klrg1\\+\\-.fcs",
+  "gd_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\+\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\+\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Treg_Eff_Klrg1\\+\\-.fcs",
+  "Treg_Eff_Klrg1\\+.fcs",
+  "Treg_Res_Klrg1\\+\\-.fcs",
+  "Treg_Res_Klrg1\\+.fcs",
+  "Treg_neg_Klrg1\\+\\-.fcs",
+  "Treg_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\+\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\+\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\+\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_2 <- purrr::map(seq_along(panel_A_classes_2), function(i) files[[2]] %>% str_which(pattern = panel_A_classes_2[i])) %>% unlist()
+files_to_load_2 <- files[[2]][indices_2]
+files_to_load_names_2 <- file_names[[2]][indices_2]
+
+files_to_load_2[files_to_load_2 %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+files_to_load_2 <- files_to_load_2[!is.na(files_to_load_2)]
+```
+
+# Second class assignment, more refined - gates_c90695
+```{r}
+panel_A_classes_3 <- panel_A_classes_4 <- panel_A_classes_5 <- c(
+  "clog\\-\\-.fcs",
+  "clog\\-_cells\\-.fcs",
+  "S1\\-.fcs",
+  "dead.fcs",
+  "S2\\-.fcs",
+  "gd_Eff_Klrg1\\+\\-.fcs",
+  "gd_Eff_Klrg1\\+.fcs",
+  "gd_Res_Klrg1\\+\\-.fcs",
+  "gd_Res_Klrg1\\+.fcs",
+  "gd_neg_Klrg1\\+\\-.fcs",
+  "gd_neg_Klrg1\\+.fcs",
+  "NK_Eff_Klrg1\\+\\-.fcs",
+  "NK_Eff_Klrg1\\+.fcs",
+  "NK_Res_Klrg1\\+\\-.fcs",
+  "NK_Res_Klrg1\\+.fcs",
+  "NK_neg_Klrg1\\+\\-.fcs",
+  "NK_neg_Klrg1\\+.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_Res_Klrg1\\+.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\-NKT_neg_Klrg1\\+.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Eff_Klrg1\\+.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_Res_Klrg1\\+.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+\\-.fcs",
+  "CD4\\+NKT_neg_Klrg1\\+.fcs",
+  "DN .fcs",
+  "Treg_Eff_Klrg1\\+\\-.fcs",
+  "Treg_Eff_Klrg1\\+.fcs",
+  "Treg_Res_Klrg1\\+\\-.fcs",
+  "Treg_Res_Klrg1\\+.fcs",
+  "Treg_neg_Klrg1\\+\\-.fcs",
+  "Treg_neg_Klrg1\\+.fcs",
+  "Th_Eff_Klrg1\\+\\-.fcs",
+  "Th_Eff_Klrg1\\+.fcs",
+  "Th_Res_Klrg1\\+\\-.fcs",
+  "Th_Res_Klrg1\\+.fcs",
+  "Th_neg_Klrg1\\+\\-.fcs",
+  "Th_neg_Klrg1\\+.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Naive_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Eff_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_Res_Klrg1\\+_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\-_VM Tcells.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells\\-.fcs",
+  "CD8\\+_neg_Klrg1\\+_VM Tcells.fcs"
+)
+```
+
+```{r}
+indices_3 <- purrr::map(seq_along(panel_A_classes_3), function(i) files[[3]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+files_to_load_3 <- files[[3]][indices_3]
+files_to_load_names_3 <- file_names[[3]][indices_3]
+```
+
+```{r}
+indices_4 <- purrr::map(seq_along(panel_A_classes_4), function(i) files[[4]] %>% str_which(pattern = panel_A_classes_4[i])) %>% unlist()
+files_to_load_4 <- files[[4]][indices_4]
+files_to_load_names_4 <- file_names[[4]][indices_4]
+```
+
+```{r}
+indices_5 <- purrr::map(seq_along(panel_A_classes_5), function(i) files[[5]] %>% str_which(pattern = panel_A_classes_5[i])) %>% unlist()
+files_to_load_5 <- files[[5]][indices_5]
+files_to_load_names_5 <- file_names[[5]][indices_5]
+```
+
+All the classes for panel A
+```{r}
+panel_A_classes_v <- c(
+  "clog+",
+  "cells-",
+  "S1-",
+  "dead",
+  "S2-",
+  "gdTCR_Eff_Klrg1-",
+  "gdTCR_Eff_Klrg1+",
+  "gdTCR_Res_Klrg1-",
+  "gdTCR_Res_Klrg1+",
+  "gdTCR_neg_Klrg1-",
+  "gdTCR_neg_Klrg1+",
+  "NK_Eff_Klrg1-",
+  "NK_Eff_Klrg1+",
+  "NK_Res_Klrg1-",
+  "NK_Res_Klrg1+",
+  "NK_neg_Klrg1+-",
+  "NK_neg_Klrg1+",
+  "CD4-NKT_Eff_Klrg1-",
+  "CD4-NKT_Eff_Klrg1+",
+  "CD4-NKT_Res_Klrg1-",
+  "CD4-NKT_Res_Klrg1+",
+  "CD4-NKT_neg_Klrg1-",
+  "CD4-NKT_neg_Klrg1+",
+  "CD4+NKT_Eff_Klrg1-",
+  "CD4+NKT_Eff_Klrg1+",
+  "CD4+NKT_Res_Klrg1-",
+  "CD4+NKT_Res_Klrg1+",
+  "CD4+NKT_neg_Klrg1-",
+  "CD4+NKT_neg_Klrg1+",
+  "DN",
+  "Tregs_Eff_Klrg1-",
+  "Tregs_Eff_Klrg1+",
+  "Tregs_Res_Klrg1-",
+  "Tregs_Res_Klrg1+",
+  "Tregs_neg_Klrg1-",
+  "Tregs_neg_Klrg1+",
+  "Th_Eff_Klrg1-",
+  "Th_Eff_Klrg1+",
+  "Th_Res_Klrg1-",
+  "Th_Res_Klrg1+",
+  "Th_neg_Klrg1-",
+  "Th_neg_Klrg1+",
+  "CD8_Naive_Klrg1-_VM Tcells-",
+  "CD8_Naive_Klrg1-_VM Tcells",
+  "CD8_Naive_Klrg1+_VM Tcells-",
+  "CD8_Naive_Klrg1+_VM Tcells",
+  "CD8_Eff_Klrg1-_VM Tcells-",
+  "CD8_Eff_Klrg1-_VM Tcells",
+  "CD8_Eff_Klrg1+_VM Tcells-",
+  "CD8_Eff_Klrg1+_VM Tcells",
+  "CD8_Res_Klrg1-_VM Tcells-",
+  "CD8_Res_Klrg1-_VM Tcells",
+  "CD8_Res_Klrg1+_VM Tcells-",
+  "CD8_Res_Klrg1+_VM Tcells",
+  "CD8_neg_Klrg1-_VM Tcells-",
+  "CD8_neg_Klrg1-_VM Tcells",
+  "CD8_neg_Klrg1+_VM Tcells-",
+  "CD8_neg_Klrg1+_VM Tcells"
+)
+```
+
+```{r}
+ko_indices_1 <- purrr::map(seq_along(panel_A_classes_3), function(i) ko_files[[1]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+ko_files_to_load_1 <- ko_files[[1]][ko_indices_1]
+ko_files_to_load_names_1 <- ko_files_names[[1]][ko_indices_1]
+```
+
+```{r}
+ko_indices_2 <- purrr::map(seq_along(panel_A_classes_3), function(i) ko_files[[2]] %>% str_which(pattern = panel_A_classes_3[i])) %>% unlist()
+ko_files_to_load_2 <- ko_files[[2]][ko_indices_2]
+ko_files_to_load_names_2 <- ko_files_names[[2]][ko_indices_2]
+```
+
+
+```{r}
+files_to_load <- c(files_to_load_1, files_to_load_2, files_to_load_4, files_to_load_5, ko_files_to_load_1, ko_files_to_load_2)
+files_to_load[files_to_load %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+files_to_load <- files_to_load[!is.na(files_to_load)]
+
+test_files <- c(files_to_load_3)
+```
+
+
+# Load files and pre-procees them ()
+```{r pre_process_data}
+diff_som_3 <- files_to_load %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+test_diff_som <- test_files %>% load_fcs_files(n_cells = 1e20, filter = TRUE, toFilter = c(1:6), scale = FALSE, transform = TRUE, toTransform = c(1:18))
+```
+
+```{r}
+pre_process_data <- function(diff_som, to_transform = c(1:18)){
+  # diff_som$fs$data <- diff_som$fs$data %>% purrr::set_names(str_remove(string = names(diff_som$fs$data), pattern = "FJComp."))
+  diff_som_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(-c(Time, File, File_scattered))
+  normally_dstributed <- diff_som_df %>% purrr::map(bestNormalize::orderNorm)
+  normally_dstributed_df <- purrr::map(seq_along(normally_dstributed), function(i) normally_dstributed[[i]]$x.t) %>% purrr::set_names(colnames(diff_som_df)) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols()
+  diff_som$fs$data[, to_transform] <- normally_dstributed_df %>% as.matrix()
+  return(diff_som)
+}
+```
+
+```{r}
+# diff_som_3 %>% saveRDS(file = paste0(source_path, "/home/trufenc/diff_som_3_2020_07_28.rds"))
+# test_diff_som %>% saveRDS(file = paste0(source_path, "/home/trufenc/test_diff_som_3020_07_28.rds"))
+```
+
+```{r}
+diff_som_3 <- readRDS(file = paste0(source_path, "home/trufenc/diff_som_2_2020_07_28.rds"))
+test_diff_som <- readRDS(file = paste0(source_path, "home/trufenc/test_diff_som_2020_07_28.rds"))
+```
+
+```{r}
+diff_som_3_normalized <- diff_som_3 %>% pre_process_data()
+test_diff_som_normalized <- test_diff_som %>% pre_process_data()
+```
+
+```{r}
+# cell_types <- files_to_load_names %>% str_remove(pattern = ".fcs") %>% str_remove(pattern = "export_Specimen_..._c....._..._..._")
+cell_types_control <- c(files_to_load_names_1, files_to_load_names_2, files_to_load_names_4, files_to_load_names_5) %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._c....._..._..._")
+
+cell_types_ko <- c(ko_files_to_load_names_1, ko_files_to_load_names_2) %>% 
+  str_remove(pattern = ".fcs") %>% 
+  str_remove(pattern = "export_Specimen_..._tg....._..._..._")
+
+cell_types <- c(cell_types_control, cell_types_ko)
+cell_types[cell_types %>% str_which(pattern = "CD8\\+_VM Tcells\\-")] <- NA
+cell_types <- cell_types[!is.na(cell_types)]
+```
+
+# function build_fcs_data_df
+```{r build_fcs_data_df}
+build_fcs_data_df <- function(cell_types, diff_som) {
+  
+  cell_types_df <- cell_types %>%
+    as.data.frame() %>%
+    rownames_to_column() %>%
+    dplyr::rename("cell_types" = ".", "File" = "rowname") %>%
+    mutate(File = File %>% as.numeric())
+
+  cell_types_df <- cell_types_df %>%
+    mutate(cell_types = cell_types %>% recode(
+      "clog--" = "clog+",
+      "clog-_cells-" = "cells-",
+      "cells_S1-" = "S1-",
+      "S2_dead" = "dead",
+      "S1_S2-" = "S2-",
+      "NK_Eff_Klrg1+-" = "NK_Eff_Klrg1-",
+      "NK_Res_Klrg1+-" = "NK_Res_Klrg1-",
+      "NK_neg_Klrg1+-" = "NK_neg_Klrg1-",
+      "gd_Eff_Klrg1+" = "gdTCR_Eff_Klrg1+",
+      "gd_Eff_Klrg1+-" = "gdTCR_Eff_Klrg1-",
+      "gd_Res_Klrg1+" = "gdTCR_Res_Klrg1+",
+      "gd_Res_Klrg1+-" = "gdTCR_Res_Klrg1-",
+      "gd_neg_Klrg1+" = "gdTCR_neg_Klrg1+",
+      "gd_neg_Klrg1+-" = "gdTCR_neg_Klrg1-",
+      "CD4-NKT_Eff_Klrg1+-" = "CD4-NKT_Eff_Klrg1-",
+      "CD4-NKT_Res_Klrg1+-" = "CD4-NKT_Res_Klrg1-",
+      "CD4-NKT_neg_Klrg1+-" = "CD4-NKT_neg_Klrg1-",
+      "CD4+NKT_Eff_Klrg1+-" = "CD4+NKT_Eff_Klrg1-",
+      "CD4+NKT_Res_Klrg1+-" = "CD4+NKT_Res_Klrg1-",
+      "CD4+NKT_neg_Klrg1+-" = "CD4+NKT_neg_Klrg1-",
+      "Th_Eff_Klrg1+-" = "Th_Eff_Klrg1-",
+      "Th_Res_Klrg1+-" = "Th_Res_Klrg1-",
+      "Th_neg_Klrg1+-" = "Th_neg_Klrg1-",
+      "Treg_Eff_Klrg1+-" = "Tregs_Eff_Klrg1-",
+      "Treg_Res_Klrg1+-" = "Tregs_Res_Klrg1-",
+      "Treg_neg_Klrg1+-" = "Tregs_neg_Klrg1-",
+      "Treg_Eff_Klrg1+" = "Tregs_Eff_Klrg1+",
+      "Treg_Res_Klrg1+" = "Tregs_Res_Klrg1+",
+      "Treg_neg_Klrg1+" = "Tregs_neg_Klrg1+",
+      "CD8_Naive_Klrg1-_VM Tcells" = "CD8_Naive_Klrg1-_VM Tcells+",
+      "CD8_Naive_Klrg1+_VM Tcells" = "CD8_Naive_Klrg1+_VM Tcells+",
+      "CD8_Eff_Klrg1-_VM Tcells" = "CD8_Eff_Klrg1-_VM Tcells+",
+      "CD8_Eff_Klrg1+_VM Tcells" = "CD8_Eff_Klrg1+_VM Tcells+",
+      "CD8_Res_Klrg1-_VM Tcells" = "CD8_Res_Klrg1-_VM Tcells+",
+      "CD8_Res_Klrg1+_VM Tcells" = "CD8_Res_Klrg1+_VM Tcells+",
+      "CD8_neg_Klrg1-_VM Tcells" = "CD8_neg_Klrg1-_VM Tcells+",
+      "CD8_neg_Klrg1+_VM Tcells" = "CD8_neg_Klrg1+_VM Tcells+",
+      "CD8+_Eff_Klrg1-_VM Tcells-" = "CD8_Eff_Klrg1-_VM Tcells-",
+      "CD8+_Eff_Klrg1+_VM Tcells" = "CD8_Eff_Klrg1+_VM Tcells+",
+      "CD8+_Eff_Klrg1+_VM Tcells-" = "CD8_Eff_Klrg1+_VM Tcells-",
+      "CD8+_Naive_Klrg1-_VM Tcells" = "CD8_Naive_Klrg1-_VM Tcells+",
+      "CD8+_Naive_Klrg1-_VM Tcells-" = "CD8_Naive_Klrg1-_VM Tcells-",
+      "CD8+_Naive_Klrg1+_VM Tcells" = "CD8_Naive_Klrg1+_VM Tcells+",
+      "CD8+_Naive_Klrg1+_VM Tcells-" = "CD8_Naive_Klrg1+_VM Tcells-",
+      "CD8+_neg_Klrg1-_VM Tcells" = "CD8_neg_Klrg1-_VM Tcells+",
+      "CD8+_neg_Klrg1-_VM Tcells-" = "CD8_neg_Klrg1-_VM Tcells-",
+      "CD8+_neg_Klrg1+_VM Tcells" = "CD8_neg_Klrg1+_VM Tcells+",
+      "CD8+_neg_Klrg1+_VM Tcells-" = "CD8_neg_Klrg1+_VM Tcells-",
+      "CD8+_Res_Klrg1-_VM Tcells" = "CD8_Res_Klrg1-_VM Tcells+",
+      "CD8+_Res_Klrg1-_VM Tcells-" = "CD8_Res_Klrg1-_VM Tcells-",
+      "CD8+_Res_Klrg1+_VM Tcells" = "CD8_Res_Klrg1+_VM Tcells+",
+      "CD8+_Res_Klrg1+_VM Tcells-" = "CD8_Res_Klrg1+_VM Tcells-"
+    ))
+
+  manual_gating <- diff_som$fs$data %>%
+    as.data.frame() %>%
+    full_join(cell_types_df) %>%
+    na.omit() %>%
+    dplyr::select(cell_types) %>%
+    unlist() %>%
+    as.character() %>%
+    factor()
+
+  facs_data_df <- diff_som$fs$data %>%
+    as.data.frame() %>%
+    dplyr::select(c(1:19))
+  # facs_data_df <- diff_som$fs$data %>% as.data.frame() %>% dplyr::select(to_transform)
+
+  facs_data_df <- facs_data_df %>%
+    purrr::set_names(str_remove(string = names(facs_data_df), pattern = "FJComp."))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(cell_type = manual_gating)
+  
+  return(facs_data_df)
+}
+
+# facs_data_df <- diff_som_3_normalized %>% build_fcs_data_df(cell_types = cell_types)
+# 
+# facs_data_df <- facs_data_df %>% 
+#   mutate(first_gate = case_when(!(cell_type %in% c("clog+", "cells-", "S1-", "S2-", "dead")) ~ "live"))
+#   
+# facs_data_df <- facs_data_df %>% 
+#   mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+```
+
+```{r}
+add_first_gate_column <- function(facs_data_df) {
+  facs_data_df <- facs_data_df %>%
+    mutate(first_gate = case_when(!(cell_type %in% c("clog+", "cells-", "S1-", "S2-", "dead")) ~ "live"))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(first_gate = if_else(is.na(first_gate), true = "not_live", false = first_gate))
+  return(facs_data_df)
+}
+```
+
+```{r}
+add_second_gate_column <- function(facs_data_df) {
+
+  facs_data_df <- facs_data_df %>%
+    mutate(second_gate = if_else(first_gate %>% str_detect(pattern = "not_live"), true = "not_live", false = as.character(cell_type)))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(second_gate = if_else(second_gate %in% c("gdTCR_neg_Klrg1-", "gdTCR_neg_Klrg1+", "NK_neg_Klrg1-", "NK_neg_Klrg1+", "CD4-NKT_neg_Klrg1-", "CD4-NKT_neg_Klrg1+", "CD4+NKT_neg_Klrg1-", "CD4+NKT_neg_Klrg1+", "Tregs_neg_Klrg1-", "Tregs_neg_Klrg1+", "Th_neg_Klrg1-", "Th_neg_Klrg1+", "CD8_neg_Klrg1-_VM Tcells-", "CD8_neg_Klrg1-_VM Tcells+", "CD8_neg_Klrg1+_VM Tcells-", "CD8_neg_Klrg1+_VM Tcells+"), true = "Not_Panel_A_cell_types", false = second_gate))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "gdTCR"), true = "gdTCR_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "NK_"), true = "NK_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD4\\-NKT_"), true = "CD4-NKT_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD4\\+NKT_"), true = "CD4+NKT_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "Tregs_"), true = "Tregs_CD4+_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "Th_"), true = "Th_CD4+_cells", false = second_gate)) %>%
+    mutate(second_gate = if_else(second_gate %>% str_detect(pattern = "CD8"), true = "CD8+_cells", false = second_gate))
+
+  return(facs_data_df)
+}
+# facs_data_df %>% vroom::vroom_write(paste(source_path, "home/trufenc/facs_data_df_complete_step_3.tsv"))
+```
+
+```{r}
+add_third_gate_column <- function(facs_data_df) {
+
+  facs_data_df <- facs_data_df %>%
+    mutate(third_gate = if_else(first_gate %>% str_detect(pattern = "not_live"), true = "not_live", false = as.character(cell_type)))
+
+  facs_data_df <- facs_data_df %>%
+    mutate(third_gate = if_else(second_gate %>% str_detect(pattern = "Not_Panel_A_cell_types|DN "), true = "Not_Panel_A_cell_types", false = third_gate))
+  
+  facs_data_df <- facs_data_df %>%
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Eff_Klrg1\\-"), true = "Eff_Klrg1_neg", false = third_gate)) %>% 
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Eff_Klrg1\\+"), true = "Eff_Klrg1_pos", false = third_gate)) %>% 
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Res_Klrg1\\-"), true = "Res_Klrg1_neg", false = third_gate)) %>% 
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Res_Klrg1\\+"), true = "Res_Klrg1_pos", false = third_gate)) %>% 
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Naive_Klrg1\\-"), true = "Naive_Klrg1_neg", false = third_gate)) %>% 
+    mutate(third_gate = if_else(third_gate %>% str_detect(pattern = "Naive_Klrg1\\+"), true = "Naive_Klrg1_pos", false = third_gate)) 
+  
+  return(facs_data_df)
+}
+# facs_data_df %>% vroom::vroom_write(paste(source_path, "home/trufenc/facs_data_df_complete_step_3.tsv"))
+```
+
+```{r}
+facs_data_df <- diff_som_3 %>% build_fcs_data_df(cell_types = cell_types)
+
+test_facs_data_df <- test_diff_som %>% build_fcs_data_df(cell_types = cell_types)
+
+facs_data_df <- facs_data_df %>% bind_rows(test_facs_data_df)
+
+facs_data_df <- facs_data_df %>% add_first_gate_column()
+
+facs_data_df <- facs_data_df %>% add_second_gate_column()
+
+facs_data_df <- facs_data_df %>% add_third_gate_column()
+```
+
+# Remove not_live and Not_Panel_A_cell_types
+```{r}
+facs_data_df$third_gate %>% unique()
+
+facs_data_df <- facs_data_df %>% dplyr::filter(!(third_gate %in% c("not_live")))
+```
+
+```{r}
+facs_data_df %>% group_by(third_gate) %>% tally()
+
+(100000-68342)*100/40
+
+(100000-39975)*100/40
+```
+
+# Manage imbalance
+```{r}
+facs_data_df_Naive_Res_neg <- facs_data_df %>% 
+  dplyr::filter(third_gate %in% c("Naive_Klrg1_neg", "Res_Klrg1_neg")) %>% 
+  dplyr::select(-c("Time", "cell_type", "first_gate", "second_gate"))
+
+new_synthetic_Naive_Klrg1_neg <- facs_data_df_Naive_Res_neg %>% 
+  imbalance::rwo(numInstances = 80000, classAttr = "third_gate")
+
+facs_data_df_Naive_Res_pos <- facs_data_df %>% 
+  dplyr::filter(third_gate %in% c("Naive_Klrg1_pos", "Res_Klrg1_pos")) %>% 
+  dplyr::select(-c("Time", "cell_type", "first_gate", "second_gate"))
+
+new_synthetic_Naive_Klrg1_pos <- facs_data_df_Naive_Res_pos %>% 
+  imbalance::rwo(numInstances = 150000, classAttr = "third_gate")
+
+
+# "14357 samples filtered by NEATER"
+# 2275.425 sec elapsed
+tic()
+Naive_Res_neg_neater <- neater(dataset = facs_data_df_Naive_Res_neg, newSamples = new_synthetic_Naive_Klrg1_neg, classAttr = "third_gate", iterations = 5)
+toc()
+
+Naive_Res_neg_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Naive_Res_neg_neater.tsv"), delim = "\t")
+
+# "5 samples filtered by NEATER"
+# 6209.029 sec elapsed
+tic()
+Naive_Res_pos_neater <- neater(dataset = facs_data_df_Naive_Res_pos, newSamples = new_synthetic_Naive_Klrg1_pos, classAttr = "third_gate", iterations = 5)
+toc()
+
+Naive_Res_pos_neater %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/Naive_Res_pos_neater.tsv"), delim = "\t")
+```
+
+```{r}
+plotComparison(dataset = facs_data_df_Naive_Res_pos, anotherDataset = Naive_Res_pos_neater, classAttr = "third_gate", cols = 6, attrs = colnames(facs_data_df_DN_and_Not)[1:18])
+
+plotComparison(dataset = facs_data_df_Naive_Res_neg, anotherDataset = Naive_Res_neg_neater, classAttr = "third_gate", cols = 6, attrs = colnames(facs_data_df_DN_and_Not)[1:18])
+```
+
+# Undersample cell types
+# create balanced cell types df with 100,000 events each
+```{r}
+Naive_Res_neg_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Naive_Res_neg_neater.tsv"), delim = "\t")
+
+Naive_Res_pos_neater <- vroom::vroom(file = paste0(source_path, "home/trufenc/Naive_Res_pos_neater.tsv"), delim = "\t")
+
+facs_data_df_list <- facs_data_df %>% split(f = .$third_gate)
+
+set.seed(123)
+facs_data_df_list$Not_Panel_A_cell_types <- facs_data_df_list$Not_Panel_A_cell_types %>% dplyr::slice(sample(100000))
+
+set.seed(123)
+facs_data_df_list$Eff_Klrg1_neg <- facs_data_df_list$Eff_Klrg1_neg %>% dplyr::slice(sample(100000))
+
+set.seed(123)
+facs_data_df_list$Eff_Klrg1_pos <- facs_data_df_list$Eff_Klrg1_pos %>% dplyr::slice(sample(100000))
+
+set.seed(123)
+facs_data_df_list$Res_Klrg1_neg <- facs_data_df_list$Res_Klrg1_neg %>% dplyr::slice(sample(100000))
+
+set.seed(123)
+facs_data_df_list$Res_Klrg1_pos <- facs_data_df_list$Res_Klrg1_pos %>% dplyr::slice(sample(100000))
+
+set.seed(123)
+facs_data_df_list$Naive_Klrg1_neg <- Naive_Res_neg_neater %>% dplyr::slice(sample(100000-nrow(facs_data_df_list$Naive_Klrg1_neg))) %>% bind_rows(facs_data_df_list$Naive_Klrg1_neg)
+
+set.seed(123)
+facs_data_df_list$Naive_Klrg1_pos <- Naive_Res_pos_neater %>% dplyr::slice(sample(100000-nrow(facs_data_df_list$Naive_Klrg1_pos))) %>% bind_rows(facs_data_df_list$Naive_Klrg1_pos)
+
+facs_data_df <- facs_data_df_list %>% bind_rows(.id = "third_gate")
+
+facs_data_df <- facs_data_df %>% dplyr::select(-c(Time, cell_type, first_gate, second_gate))
+
+facs_data_df %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/balanced_data_6_classes_third_gate.tsv"), delim = "\t")
+```
+
+# Load balanced df with 6 classes
+```{r}
+facs_data_df <- vroom::vroom(file = paste0(source_path, "home/trufenc/balanced_data_6_classes_third_gate.tsv"), delim = "\t")
+```
+
+```{r}
+facs_data_df <- facs_data_df %>% dplyr::filter(!(third_gate %in% c("Naive_Klrg1_pos", "Naive_Klrg1_neg")))
+```
+
+# Normalize dataset
+```{r}
+normalized_df <- facs_data_df %>% dplyr::select(-third_gate) %>% purrr::map(bestNormalize::orderNorm)
+normally_dstributed_df <- purrr::map(seq_along(normalized_df), function(i) normalized_df[[i]]$x.t) %>% purrr::set_names(colnames(facs_data_df)[1:18]) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols()
+facs_data_df <- normally_dstributed_df %>% mutate(third_gate = facs_data_df$third_gate)
+```
+
+# Selected features
+```{r}
+facs_data_df <- facs_data_df %>% dplyr::select(c("APC.Cy7.A", "PE.A", "PerCP.Cy5.5.A", "FITC.A",  "third_gate"))
+```
+
+```{r}
+# randomize
+set.seed(123)
+facs_data_df <- facs_data_df[sample(nrow(facs_data_df)), ]
+
+set.seed(123)
+test_indices <- sample(nrow(facs_data_df)*.1)
+
+test_df <- facs_data_df[test_indices, ]
+train_df <- facs_data_df[-test_indices, ]
+
+# normalize data
+# normally_dstributed_test_list <- test_df %>% dplyr::select(-c(second_gate)) %>% purrr::map(bestNormalize::orderNorm)
+# normally_dstributed_test_df <- purrr::map(seq_along(normally_dstributed_test_list), function(i) normally_dstributed_test_list[[i]]$x.t) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% purrr::set_names(colnames(test_df)[1:18]) %>% mutate(second_gate = test_df$second_gate)
+# test_df <- normally_dstributed_test_df
+# 
+# normally_dstributed_train_list <- train_df %>% dplyr::select(-c(second_gate)) %>% purrr::map(bestNormalize::orderNorm)
+# normally_dstributed_train_df <- purrr::map(seq_along(normally_dstributed_train_list), function(i) normally_dstributed_train_list[[i]]$x.t) %>% purrr::map(scale, center = TRUE, scale = TRUE) %>% purrr::map(scale_to_range_0_1) %>% bind_cols() %>% purrr::set_names(colnames(train_df)[1:18]) %>% mutate(second_gate = train_df$second_gate)
+# train_df <- normally_dstributed_train_df
+
+# train_df %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/train_df.tsv"), delim = "\t")
+# test_df %>% vroom::vroom_write(path = paste0(source_path, "home/trufenc/test_df.tsv"), delim = "\t")
+```
+
+```{r}
+step_3_levels <- facs_data_df$third_gate %>% unique()
+n_classes <- length(step_3_levels)
+```
+
+```{r}
+classes_number <- data.frame(
+  classes = step_3_levels,
+  Number = 1:length(step_3_levels)
+  )
+```
+
+```{r}
+test_label <- test_df %>% 
+  dplyr::select(third_gate) %>% 
+  pull() %>% 
+  str_replace(pattern = "Eff_Klrg1_pos", replacement = "1") %>% 
+  str_replace(pattern = "Eff_Klrg1_neg", replacement = "2") %>% 
+  str_replace(pattern = "Res_Klrg1_pos", replacement = "3") %>% 
+  str_replace(pattern = "Res_Klrg1_neg", replacement = "4") %>% 
+  # str_replace(pattern = "Naive_Klrg1_pos", replacement = "5") %>% 
+  # str_replace(pattern = "Naive_Klrg1_neg", replacement = "6") %>% 
+  str_replace(pattern = "Not_Panel_A_cell_types", replacement = "5") %>% 
+  as.numeric() %>%
+  '-'(1) 
+
+test_matrix <- xgb.DMatrix(
+  data = test_df %>% 
+    # dplyr::select(-c(Time, cell_type, first_gate, third_gate)) %>%
+    dplyr::select(-c(third_gate)) %>% 
+    as.matrix(), 
+  label = test_label
+  )
+```
+
+```{r}
+train_label <- train_df %>% 
+  dplyr::select(third_gate) %>% 
+  pull() %>% 
+  str_replace(pattern = "Eff_Klrg1_pos", replacement = "1") %>% 
+  str_replace(pattern = "Eff_Klrg1_neg", replacement = "2") %>% 
+  str_replace(pattern = "Res_Klrg1_pos", replacement = "3") %>% 
+  str_replace(pattern = "Res_Klrg1_neg", replacement = "4") %>% 
+  # str_replace(pattern = "Naive_Klrg1_pos", replacement = "5") %>% 
+  # str_replace(pattern = "Naive_Klrg1_neg", replacement = "6") %>% 
+  str_replace(pattern = "Not_Panel_A_cell_types", replacement = "5") %>% 
+  as.numeric() %>%
+  '-'(1) 
+
+train_matrix <- xgb.DMatrix(
+  data = train_df %>% 
+    # dplyr::select(-c(Time, cell_type, first_gate, third_gate)) %>% 
+    dplyr::select(-c(third_gate)) %>% 
+    as.matrix(), 
+  label = train_label
+  )
+```
+
+# Xgboost
+```{r}
+k_fold <- 10
+
+n_round <- 100
+
+# xgboost fitting with arbitrary parameters
+
+# parameter to tune: 
+# nrounds controls the maximum number of iterations. For classification, it is similar to the number of trees to grow.
+# eta controls the learning rate, i.e., the rate at which our model learns patterns in data. Typically, it lies between 0.01 - 0.3
+# gamma controls regularization (or prevents overfitting)
+# max_depth controls the depth of the tree. Larger data sets require deep trees to learn the rules from data.
+# subsample controls the number of samples (observations) supplied to a tree. Typically, its values lie between (0.5-0.8)
+# colsample_bytree control the number of features (variables) supplied to a tree. Typically, its values lie between (0.5,0.9)
+# lambda controls L2 regularization (equivalent to Ridge regression) on weights. It is used to avoid overfitting.
+# alpha controls L1 regularization (equivalent to Lasso regression) on weights. In addition to shrinkage, enabling alpha also results in feature selection. Hence, it's more useful on high dimensional data sets.
+
+# Learning Task Parameters
+## Objective
+### multi:softmax - multiclassification using softmax objective. It returns predicted class labels.
+### multi:softprob - multiclassification using softmax objective. It returns predicted class probabilities.
+
+## eval_metric
+### AUC - Area under curve (used in classification)
+### Logloss - Negative loglikelihood (used in classification)
+### mlogloss - multiclass logloss (used in classification)
+
+# default parameters
+# xgb_params <- list(
+#   booster = "gbtree",
+#   objective = "multi:softprob",
+#   eta = 0.1,
+#   gamma = 0,
+#   max_depth = 6,
+#   min_child_weight = 1,
+#   subsample = 1,
+#   colsample_bytree = 1,
+#   num_class = n_classes,
+#   nthread = 50
+# )
+
+xgb_params <- list(
+  booster = "gbtree",
+  # booster = "dart",
+  objective = "multi:softprob",
+  eta = 0.01,
+  gamma = 5.171851,
+  max_depth = 10,
+  min_child_weight = 3.341246,
+  subsample = 0.9692583,
+  colsample_bytree = 0.7301438,
+  # reg_alpha = 0.01,
+  num_class = n_classes,
+  nthread = 50
+)
+
+
+# xgb_params <- list(
+#   # booster = "gbtree",
+#   booster = "dart",
+#   objective = "multi:softprob",
+#   eta = 0.1,
+#   gamma = 6.332825,
+#   max_depth = 5,
+#   min_child_weight = 6.843922,
+#   subsample = 0.7082485,
+#   colsample_bytree = 0.8517275,
+#   num_class = n_classes,
+#   nthread = 50
+# )
+
+# fit the model with the arbitrary parameters specified above
+# 4201.047 sec elapsed
+tic()
+xgb_cv_model_1 <- xgb.cv(
+  params = xgb_params,
+  data = train_matrix,
+  nrounds = n_round,
+  nfold = k_fold,
+  showsd = T,
+  stratified = T,
+  print_every_n = 1,
+  early_stopping_rounds = 10,
+  maximize = F,
+  prediction = TRUE
+)
+toc()
+
+# Best iteration: 224
+xgb_cv_model_1$best_iteration
+
+xgb_cv_model_1$evaluation_log %>% dplyr::filter(iter == xgb_cv_model_1$best_iteration) %>% dplyr::select(test_merror_mean) %>% pull
+
+# xgb_cv_model_1 %>% saveRDS(file = paste0(source_path, "home/trufenc/xgb_cv_model_standard_parameters.rds"))
+
+xgb_cv_model_1$evaluation_log %>% 
+  ggplot(aes(x = iter)) +
+  geom_line(aes(y = train_merror_mean, colour = "train")) + 
+  geom_line(aes(y = test_merror_mean, colour = "test"))
+
+# first default - model training
+tic()
+xgb_1 <- xgb.train(
+  params = xgb_params, 
+  data = train_matrix, 
+  nrounds = xgb_cv_model_1$best_iteration, 
+  watchlist = list(val = test_matrix, train = train_matrix), 
+  print_every_n = 1, 
+  early_stopping_rounds = 10, 
+  maximize = F , 
+  eval_metric = "merror"
+  )
+toc()
+
+# model prediction
+xgb_pred <- predict(xgb_1, test_matrix)
+
+test_prediction_df <- matrix(
+  data = xgb_pred,
+  nrow = n_classes,
+  ncol = length(xgb_pred) / n_classes
+  ) %>%
+  t() %>%
+  data.frame()
+
+test_prediction <- test_prediction_df %>%
+  mutate(
+    label = test_label %>% as.numeric() + 1,
+    max_prob = max.col(., "last")
+  )
+
+# xgb_pred <- ifelse(xgb_pred > 0.5, 1, 0)
+
+# confusion matrix
+library(caret)
+confusion_matrix <- confusionMatrix(factor(test_prediction$label), factor(test_prediction$max_prob))
+
+#view variable importance plot
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix), model = xgb_1)
+
+gp = xgb.ggplot.importance(importance_matrix = importance_matrix)
+print(gp)
+```
+
+# Step_3_CD8_pos model
+```{r}
+# first default - model training
+tic()
+xgb_step3_CD8_pos_model <- xgb.train(
+  params = xgb_params, 
+  data = train_matrix, 
+  nrounds = 500, 
+  watchlist = list(val = test_matrix, train = train_matrix), 
+  print_every_n = 1, 
+  early_stopping_rounds = 10, 
+  maximize = F , 
+  eval_metric = "merror"
+  )
+toc()
+
+
+xgb_step3_CD8_pos_model %>% saveRDS(file = paste0(source_path, "home/trufenc/xgb_model_step_3_CD8_pos.rds"))
+```
+
+# Step_3 model
+```{r}
+# first default - model training
+tic()
+xgb_step3_model <- xgb.train(
+  params = xgb_params, 
+  data = train_matrix, 
+  nrounds = 500, 
+  watchlist = list(val = test_matrix, train = train_matrix), 
+  print_every_n = 1, 
+  early_stopping_rounds = 10, 
+  maximize = F , 
+  eval_metric = "merror"
+  )
+toc()
+
+
+xgb_step3_model %>% saveRDS(file = paste0(source_path, "home/trufenc/xgb_step3_model.rds"))
+```
+
+# mlr - xgboost
+# Tune max_depth and min_child_weight
+```{r}
+library(mlr)
+
+# Convert characters to factors
+train_df <- train_df %>% mutate(third_gate = third_gate %>% factor()) %>% as.data.frame()
+test_df <- test_df %>% mutate(third_gate = third_gate %>% factor()) %>% as.data.frame()
+
+# Do one hot encoding`<br/>
+train_df <- createDummyFeatures(obj = train_df, target = "third_gate", method = "1-of-n")
+test_df <- createDummyFeatures(obj = test_df, target = "third_gate", method = "1-of-n")
+
+# Create tasks
+train_task <- makeClassifTask(data = train_df, target = "third_gate")
+test_task <- makeClassifTask(data = test_df, target = "third_gate")
+
+# Create learner
+lrn <- makeLearner("classif.xgboost", predict.type = "response")
+lrn$par.vals <- list(objective = "multi:softprob", eval_metric = "merror", nrounds = 100L, eta = 0.1, booster = "gbtree", max_depth = 10, min_child_weight = 3.341246, gamma = 5.171851)
+
+# Set parameter space
+params <- makeParamSet(
+  # makeDiscreteParam("booster", values = c("gbtree", "dart")),
+  # makeIntegerParam("max_depth", lower = 3L, upper = 10L),
+  # makeNumericParam("min_child_weight", lower = 1L, upper = 10L)
+  makeNumericParam("subsample", lower = 0.5, upper = 1),
+  makeNumericParam("colsample_bytree", lower = 0.5, upper = 1)
+  # makeNumericParam("gamma", lower = 5L, upper = 10L)
+)
+
+# set resampling strategy
+rdesc <- makeResampleDesc("CV", stratify = T, iters = 5L)
+
+# Search strategy
+ctrl <- makeTuneControlRandom(maxit = 10L)
+
+# Set parallel backend
+library(parallel)
+library(parallelMap) 
+# parallelStartSocket(cpus = (detectCores()-1))
+parallelStartSocket(cpus = 50)
+
+#parameter tuning
+# 98904.702
+# 61985.26
+# 28194.842 sec elapsed for gammma tuning!
+tic()
+xgb_tuning <- tuneParams(learner = lrn, task = train_task, resampling = rdesc, measures = acc, par.set = params, control = ctrl, show.info = T)
+toc()
+
+# xgb_tuning %>% saveRDS("~/Documents/xgb_tuning_step_3_balanced_data.rds")
+# xgb_tuning <- readRDS("~/Documents/xgb_tuning_step_3_balanced_data.rds")
+
+xgb_tuning$y
+
+#set hyperparameters
+lrn_tune <- setHyperPars(lrn,par.vals = xgb_tuning$x)
+
+#train model
+xg_model <- train(learner = lrn_tune, task = train_task)
+
+#predict model
+xg_pred <- predict(xg_model, test_task)
+
+confusion_matrix <- confusionMatrix(xg_pred$data$response, xg_pred$data$truth)
+
+conf_df <- confusion_matrix$byClass %>% as.data.frame()
+
+conf_df$F1
+```
+
+
+
+# Random forest
+```{r}
+rf_train <- train_df %>% mutate(third_gate = train_label %>% factor())
+# rf_train <- train_df %>% dplyr::select(c("APC.Cy7.A", "PE.A", "PerCP.Cy5.5.A", "FITC.A",  "third_gate")) %>% mutate(third_gate = train_label %>% factor())
+
+rf_test <- test_df %>% mutate(third_gate = test_label %>% factor())
+# rf_test <- test_df %>% dplyr::select(c("APC.Cy7.A", "PE.A", "PerCP.Cy5.5.A", "FITC.A",  "third_gate")) %>% mutate(third_gate = test_label %>% factor())
+
+set.seed(123)
+tic()
+# rf_model <- ranger(formula = third_gate ~ ., data = rf_train, num.threads = 50, num.trees = 1600, mtry = 18, max.depth = 19, min.node.size = 0, splitrule = "gini")
+rf_model <- ranger(formula = third_gate ~ ., data = rf_train, num.threads = 50, num.trees = 500, mtry = 4, max.depth = 0, min.node.size = 1, splitrule = "extratrees")
+# rf_model <- ranger(formula = third_gate ~ ., data = rf_train, num.threads = 50, num.trees = 2500, mtry = 18, max.depth = 0, min.node.size = 1, splitrule = "extratrees")
+toc()
+
+confusionMatrix(rf_train$third_gate, rf_model$predictions)
+
+rf_pred <- predict(rf_model, rf_test %>% dplyr::select(-third_gate))
+
+confusionMatrix(rf_test$third_gate, rf_pred$predictions)
+```
+
+
+```{r}
+library(ranger)
+  set.seed(123)
+  # rf_model <- ranger(data = rf_train, formula = third_gate ~ ., num.threads = 50, num.trees = 500, mtry = 4, splitrule = "extratrees")
+
+  from_to <- seq(from = 500, to = 2000, by = 100)
+  
+  tic()
+  rf_model_list <- purrr::map(from_to, function(i) ranger(data = rf_train, formula = third_gate ~ ., num.threads = 50, num.trees = i, mtry = 1, splitrule = "extratrees", min.node.size = 1, max.depth = 0))
+  toc()
+  
+  cm_train_list <- purrr::map(seq_along(rf_model_list), function(i) confusionMatrix(rf_train$third_gate, rf_model_list[[i]]$predictions))
+
+  cm_train_df <- cm_train_list %>% purrr::map(function(x) x %>% .$overall %>% t() %>% as.data.frame()) %>% bind_rows()
+  
+  rf_pred_list <- purrr::map(seq_along(rf_model_list), function(i) predict(rf_model_list[[i]], rf_test %>% dplyr::select(-third_gate)))
+
+  cm_test_list <- purrr::map(seq_along(rf_model_list), function(i) confusionMatrix(rf_test$third_gate, rf_pred_list[[i]]$predictions))
+  
+  cm_test_df <- cm_test_list %>% purrr::map(function(x) x %>% .$overall %>% t() %>% as.data.frame()) %>% bind_rows()
+  
+  acc_data <- data.frame(train_acc = cm_train_df$Accuracy,
+             eval_acc = cm_test_df$Accuracy,
+             num.trees = from_to)
+  
+  acc_data %>% tidyr::gather(key = "key", value = "value", -num.trees) %>% ggplot(aes(x = num.trees, y = value, colour = key)) + geom_line()
+  
+  kappa_data <- data.frame(train_kappa = cm_train_df$Kappa,
+             eval_kappa = cm_test_df$Kappa,
+             num.trees = from_to)
+  
+  kappa_data %>% tidyr::gather(key = "key", value = "value", -num.trees) %>% ggplot(aes(x = num.trees, y = value, colour = key)) + geom_line()
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+

@@ -1,0 +1,518 @@
+---
+title: "motif_ER1_Olha_Pyko"
+author: "Carlos Eduardo Madureira Trufen"
+date: "2023-08-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load libraries
+```{r}
+# library(biomartr)
+library(Biostrings)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(memes)
+library(MotifDb)
+library(org.Mm.eg.db)
+library(rtracklayer)
+library(tictoc)
+library(tidyverse)
+
+library(foreach)
+library(doParallel)
+
+path_to_data <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/motif_ER1_Olha_Pyko/"
+```
+
+# Load gff file
+```{r}
+mm_genomic_gff <- read_gff(file = paste0(path_to_data, "mm_genomic.gff"))
+
+mm_genomic_gff <- rtracklayer::import(con = paste0(path_to_data, "mm_genomic.gff"))
+```
+
+# Load the genome
+```{r}
+genome <- BSgenome.Mmusculus.UCSC.mm10
+```
+
+```{r}
+# memes::check_meme_install()
+```
+
+# Get motifs data from https://meme-suite.org/meme//opal-jobs/appFIMO_5.5.31691568412062-1254331061/fimo.html
+```{r}
+# motif_data <- read_delim(paste0(path_to_data, "fimo.tsv"), 
+#      delim = "\t", escape_double = FALSE, 
+#      trim_ws = TRUE)
+# 
+# motif_data <- motif_data %>% 
+#   na.omit()
+
+fimo_files <- list.files(path = path_to_data, pattern = "fimo_out")
+
+motif_data_list <- purrr::map(seq_along(fimo_files), function(i){
+  read_delim(paste0(path_to_data, fimo_files[i], "/fimo.tsv"), 
+     delim = "\t", escape_double = FALSE, 
+     trim_ws = TRUE)})
+
+motif_data_list <- motif_data_list %>% purrr::set_names(fimo_files %>% str_remove_all(pattern = "human_|_fimo_out"))
+
+motif_data_list <- motif_data_list %>% 
+  purrr::map(na.omit)
+```
+
+# Create a GRanges object with the motif data
+```{r}
+gr <- GRanges(seqnames = motif_data$sequence_name,
+              ranges = IRanges(start = motif_data$start, end = motif_data$stop),
+              strand = motif_data$strand,
+              score = motif_data$score,
+              # pvalue = motif_data$p.value,
+              # qvalue = motif_data$q.value,
+              motif_id = motif_data$motif_id,
+              motif_alt_id = motif_data$motif_alt_id,
+              matched_sequence = motif_data$matched_sequence)
+```
+
+
+# Load Mus musculus genome data from NCBI into R using rtracklayer package
+```{r}
+# mm_genome <- rtracklayer::import("https://www.ncbi.nlm.nih.gov/genome/gdv/browser/genome/?id=GCF_000001635.27")
+chromosome_19_Mus_musculus <- file.path(path_to_data, "chromosome_19_Mus_musculus.GFF3")
+mm_genome_gff <- rtracklayer::import(chromosome_19_Mus_musculus)
+
+mm_genome_gff_df <- mm_genome_gff %>% 
+  as.data.frame() 
+
+mm_genome_gff_df <- mm_genome_gff_df %>% 
+  mutate(chromosome = rep("19", times = nrow(mm_genome_gff_df)))
+
+
+mm_genome_gff_df %>% vroom::vroom_write(file = paste0(path_to_data, "mm_genome_gff_df.tsv"), delim = "\t")
+
+mm_genome_gff <- makeGRangesFromDataFrame(df = mm_genome_gff_df, 
+                         seqnames.field = c("seqnames"),
+                         keep.extra.columns = FALSE
+                         )
+
+
+# list of gff files
+gff_files_list <- list.files(path = path_to_data, pattern = "04_chr")
+mm_gff_files <- file.path(path_to_data, gff_files_list)
+
+chr_names <- gff_files_list %>% str_extract(pattern = "chr_[0-9][0-9]|chr_[0-9]|chr_[A-Z]")
+
+mm_genome_gff_list <- mm_gff_files %>% purrr::map(rtracklayer::import)
+
+mm_genome_gff_list <- mm_genome_gff_list %>% purrr::set_names(chr_names)
+
+mm_genome_df_list <- mm_genome_gff_list %>% 
+  purrr::map(as.data.frame)
+
+mm_genome_df_list <- purrr::map(seq_along(mm_genome_df_list), function(i) mm_genome_df_list[[i]] %>% mutate(chromosome = rep(str_remove(string = names(mm_genome_df_list)[i], pattern = "chr_"), times = nrow(mm_genome_df_list[[i]]))))
+  
+mm_genome_df_list <- mm_genome_df_list %>% purrr::set_names(chr_names)
+
+mm_genome_df_list %>% qs::qsave(file = paste0(path_to_data, "mm_genome_df_list.qs"), nthreads = 50)
+mm_genome_df_list <- qs::qread(file = paste0(path_to_data, "mm_genome_df_list.qs"), nthreads = 50)
+
+mm_genome_gff_list <- mm_genome_df_list %>% purrr::map(function(x) {
+  makeGRangesFromDataFrame(df = x, 
+                           seqnames.field = c("seqnames"),
+                           keep.extra.columns = FALSE
+                           )
+  })
+
+mm_genome_gff_list %>% qs::qsave(file = paste0(path_to_data, "mm_genome_gff_list.qs"), nthreads = 50) 
+
+mm_genome_gff_list <- qs::qread(file = paste0(path_to_data, "mm_genome_gff_list.qs"), nthreads = 50) 
+# 
+# mm_genome_gff <- GRanges(
+#   seqnames = mm_genome_gff_df$seqnames,
+#   ranges = IRanges(start = mm_genome_gff_df$start, end = mm_genome_gff_df$end),
+#   strand = mm_genome_gff_df$strand,      
+#   type = mm_genome_gff_df$type,      
+#   score = mm_genome_gff_df$score,      
+#   phase = mm_genome_gff_df$phase,      
+#   ID = mm_genome_gff_df$ID,      
+#   Name = mm_genome_gff_df$Name,      
+#   chromosome = mm_genome_gff_df$chromosome,      
+#   gbkey = mm_genome_gff_df$gbkey,      
+#   genome = mm_genome_gff_df$genome,      
+#               mol_type = mm_genome_gff_df$mol_type,      
+#               Dbxref = mm_genome_gff_df$Dbxref,      
+#               description = mm_genome_gff_df$description,      
+#               gene = mm_genome_gff_df$gene,      
+#               gene_biotype = mm_genome_gff_df$gene_biotype,          
+#               Parent = mm_genome_gff_df$Parent,  
+#               model_evidence = mm_genome_gff_df$model_evidence,  
+#               product = mm_genome_gff_df$product,  
+#               transcript_id = mm_genome_gff_df$transcript_id,  
+#               inference = mm_genome_gff_df$inference,  
+#               pseudo = mm_genome_gff_df$pseudo,  
+#               gene_synonym = mm_genome_gff_df$gene_synonym,  
+#               tag = mm_genome_gff_df$tag,  
+#               protein_id = mm_genome_gff_df$protein_id,  
+#               Note = mm_genome_gff_df$Note
+#               )
+
+
+```
+
+
+```{r}
+mm_genome_df_list <- qs::qread(file = paste0(path_to_data, "mm_genome_df_list.qs"), nthreads = 50)
+
+motif_data = motif_data_list$chr_1
+mm_genome_gff_df = mm_genome_df_list$chr_1
+
+overlaps_list <- purrr::map(seq_along(motif_data$start), function(i){
+  motif_start <- motif_data$start[i]
+  motif_end <- motif_data$stop[i]
+  
+  overlaps_chr <- mm_genome_gff_df[mm_genome_gff_df$start <= motif_end & 
+                                       mm_genome_gff_df$end >= motif_start,]
+  
+  overlaps_chr <- overlaps_chr %>% dplyr::filter(type == "gene")
+  
+  if(length(overlaps_chr$Name) == 1){
+    overlaps <- overlaps_chr$Name
+  } else if(length(overlaps_chr$Name) > 1) {
+    overlaps <- overlaps_chr$Name %>% str_c(collapse = ", ")  
+  } else{
+    overlaps <- "NA"
+  }
+
+}
+)
+
+overlaps_v <- overlaps_list %>% unlist()
+
+motif_data <- motif_data %>% mutate(overlaps = overlaps_v)
+
+find_overlaps <- function(motif_df, gff_df) {
+
+  # Remove chromosome data
+  gff_df <- gff_df %>% dplyr::filter(is.na(genome))
+  
+  # Create a list of overlaps
+  overlaps_list <- purrr::map(seq_along(motif_df[["start"]]), function(i) {
+    
+    motif_start <- motif_df[["start"]][i]
+    motif_end <- motif_df[["stop"]][i]
+
+    overlaps_chr <- gff_df[gff_df[["start"]] <= motif_end &
+                                     gff_df[["end"]] >= motif_start, ]
+
+    overlaps_chr <- overlaps_chr[overlaps_chr[["type"]] == "gene", ]
+
+    if (length(overlaps_chr[["Name"]]) == 1) {
+      overlaps <- overlaps_chr[["Name"]]
+    } else if (length(overlaps_chr[["Name"]]) > 1) {
+      overlaps <- paste(overlaps_chr[["Name"]], collapse = ", ")
+    } else {
+      overlaps <- "NA"
+    }
+
+    return(overlaps)
+  })
+
+  # Convert the list of overlaps to a vector
+  overlaps_v <- unlist(overlaps_list)
+
+  # Add the overlaps column to the motif_df dataframe
+  motif_df <- motif_df %>% mutate(overlaps = overlaps_v)
+
+  return(motif_df)
+}
+
+tic()
+find_overlaps(motif_df = motif_data_list$chr_2, 
+              gff_df = mm_genome_df_list$chr_2)
+toc()
+
+chr_names <- gff_files_list %>% str_extract(pattern = "chr_[0-9][0-9]|chr_[0-9]|chr_[A-Z]")
+
+tic()
+motif_data_list <- purrr::map(seq_along(chr_names), function(i){
+  find_overlaps(motif_df = motif_data_list[[chr_names[i]]], 
+              gff_df = mm_genome_df_list[[chr_names[i]]])
+})
+toc()
+
+find_overlaps_parallel <- function(motif_df, gff_df) {
+
+  library(foreach)
+  library(doParallel)
+  
+  # Register a parallel backend
+  cores <- detectCores()
+  
+  cl <- makeCluster(cores - 1)
+  
+  # Register the backend with foreach
+  registerDoParallel(cl)
+
+  
+  
+  # Remove chromosome data
+  gff_df <- gff_df %>% dplyr::filter(is.na(genome))
+  
+  # Create a list of overlaps
+  overlaps_list <- foreach(i = seq_along(motif_df[["start"]]), .combine = c) %dopar% {
+    
+    motif_start <- motif_df[["start"]][i]
+    motif_end <- motif_df[["stop"]][i]
+
+    overlaps_chr <- gff_df[gff_df[["start"]] <= motif_end &
+                                     gff_df[["end"]] >= motif_start, ]
+
+    overlaps_chr <- overlaps_chr[overlaps_chr[["type"]] == "gene", ]
+
+    if (length(overlaps_chr[["Name"]]) == 1) {
+      overlaps <- overlaps_chr[["Name"]]
+    } else if (length(overlaps_chr[["Name"]]) > 1) {
+      overlaps <- paste(overlaps_chr[["Name"]], collapse = ", ")
+    } else {
+      overlaps <- "NA"
+    }
+
+    return(overlaps)
+  }
+
+  # Convert the list of overlaps to a vector
+  overlaps_v <- unlist(overlaps_list)
+
+  # Add the overlaps column to the motif_df dataframe
+  motif_df <- motif_df %>% mutate(overlaps = overlaps_v)
+  
+  # Stop the cluster
+  stopCluster(cl)
+
+  return(motif_df)
+}
+
+# Call the parallelized function
+chr_names <- gff_files_list %>% str_extract(pattern = "chr_[0-9][0-9]|chr_[0-9]|chr_[A-Z]")
+
+tic()
+motif_data_list <- purrr::map(seq_along(chr_names), function(i){
+  find_overlaps_parallel(motif_df = motif_data_list[[chr_names[i]]], 
+                         gff_df = mm_genome_df_list[[chr_names[i]]])
+})
+toc()
+
+
+
+motif_data_list <- motif_data_list %>% purrr::set_names(chr_names)
+
+motif_data_list %>% qs::qsave(file = paste0(path_to_data, "motif_data_list_with_overlaps.qs"), nthreads = 50)
+
+motif_data_list <- qs::qread(file = paste0(path_to_data, "motif_data_list_with_overlaps.qs"), nthreads = 50)
+
+```
+
+
+
+
+# Human
+```{r}
+fimo_files <- list.files(path = path_to_data, pattern = "human.*fimo_out")
+
+motif_data_list <- purrr::map(seq_along(fimo_files), function(i){
+  read_delim(paste0(path_to_data, fimo_files[i], "/fimo.tsv"), 
+     delim = "\t", escape_double = FALSE, 
+     trim_ws = TRUE)})
+
+motif_data_list <- motif_data_list %>% purrr::set_names(fimo_files %>% str_remove_all(pattern = "human_|_fimo_out"))
+
+motif_data_list <- motif_data_list %>% 
+  purrr::map(na.omit)
+```
+
+
+# Human gff
+```{r}
+# list of gff files
+gff_files_list <- list.files(path = paste0(path_to_data, "human_chr_gff"), pattern = "human")
+human_gff_files <- file.path(paste0(path_to_data, "human_chr_gff"), gff_files_list)
+
+chr_names <- gff_files_list %>% str_extract(pattern = "chr_[0-9][0-9]|chr_[0-9]|chr_[A-Z]")
+
+human_genome_gff_list <- human_gff_files %>% purrr::map(rtracklayer::import)
+
+human_genome_gff_list <- human_genome_gff_list %>% purrr::set_names(chr_names)
+
+human_genome_df_list <- human_genome_gff_list %>% 
+  purrr::map(as.data.frame)
+
+human_genome_df_list <- purrr::map(seq_along(human_genome_df_list), function(i) human_genome_df_list[[i]] %>% mutate(chromosome = rep(str_remove(string = names(human_genome_df_list)[i], pattern = "chr_"), times = nrow(human_genome_df_list[[i]]))))
+  
+human_genome_df_list <- human_genome_df_list %>% purrr::set_names(chr_names)
+
+human_genome_df_list %>% qs::qsave(file = paste0(path_to_data, "human_genome_df_list.qs"), nthreads = 50)
+human_genome_df_list <- qs::qread(file = paste0(path_to_data, "human_genome_df_list.qs"), nthreads = 50)
+
+human_genome_gff_list <- human_genome_df_list %>% purrr::map(function(x) {
+  makeGRangesFromDataFrame(df = x, 
+                           seqnames.field = c("seqnames"),
+                           keep.extra.columns = FALSE
+                           )
+  })
+
+human_genome_gff_list %>% qs::qsave(file = paste0(path_to_data, "human_genome_gff_list.qs"), nthreads = 50) 
+
+human_genome_gff_list <- qs::qread(file = paste0(path_to_data, "human_genome_gff_list.qs"), nthreads = 50) 
+
+```
+
+```{r}
+human_genome_df_list <- qs::qread(file = paste0(path_to_data, "human_genome_df_list.qs"), nthreads = 50)
+
+find_overlaps_parallel <- function(motif_df, gff_df) {
+
+  library(foreach)
+  library(doParallel)
+  
+  # Register a parallel backend
+  cores <- detectCores()
+  
+  cl <- makeCluster(cores - 1)
+  
+  # Register the backend with foreach
+  registerDoParallel(cl)
+
+  # Remove chromosome data
+  gff_df <- gff_df %>% dplyr::filter(is.na(genome))
+  
+  # Create a list of overlaps
+  overlaps_list <- foreach(i = seq_along(motif_df[["start"]]), .combine = c) %dopar% {
+    
+    motif_start <- motif_df[["start"]][i]
+    motif_end <- motif_df[["stop"]][i]
+
+    overlaps_chr <- gff_df[gff_df[["start"]] <= motif_end &
+                                     gff_df[["end"]] >= motif_start, ]
+
+    overlaps_chr <- overlaps_chr[overlaps_chr[["type"]] == "gene", ]
+
+    if (length(overlaps_chr[["Name"]]) == 1) {
+      overlaps <- overlaps_chr[["Name"]]
+    } else if (length(overlaps_chr[["Name"]]) > 1) {
+      overlaps <- paste(overlaps_chr[["Name"]], collapse = ", ")
+    } else {
+      overlaps <- "NA"
+    }
+
+    return(overlaps)
+  }
+
+  # Convert the list of overlaps to a vector
+  overlaps_v <- unlist(overlaps_list)
+
+  # Add the overlaps column to the motif_df dataframe
+  motif_df <- motif_df %>% mutate(overlaps = overlaps_v)
+  
+  # Stop the cluster
+  stopCluster(cl)
+
+  return(motif_df)
+}
+
+# Call the parallelized function
+chr_names <- gff_files_list %>% str_extract(pattern = "chr_[0-9][0-9]|chr_[0-9]|chr_[A-Z]")
+
+tic()
+motif_data_list <- purrr::map(seq_along(chr_names), function(i){
+  find_overlaps_parallel(motif_df = motif_data_list[[chr_names[i]]], 
+                         gff_df = human_genome_df_list[[chr_names[i]]])
+})
+toc()
+
+
+
+motif_data_list <- motif_data_list %>% purrr::set_names(chr_names)
+
+motif_data_list %>% qs::qsave(file = paste0(path_to_data, "human_ER1_motif_data_list_with_overlaps.qs"), nthreads = 50)
+
+motif_data_list <- qs::qread(file = paste0(path_to_data, "human_ER1_motif_data_list_with_overlaps.qs"), nthreads = 50)
+
+```
+
+
+```{r}
+find_nearest_neighbor_parallel <- function(motif_df, gff_df){
+
+  library(foreach)
+  library(doParallel)
+  
+  # Register a parallel backend
+  cores <- detectCores()
+  
+  cl <- makeCluster(cores - 1)
+  
+  # Register the backend with foreach
+  registerDoParallel(cl)
+
+  # Find nearest gene for each motif
+  nearest_gene_list <- foreach(i = seq_along(motif_df$start), .combine = c) %dopar% {
+  
+  # Get motif position
+  pos <- motif_df$start[i]
+  
+  # Find distance to closest gene
+  dists <- abs(gff_df$start - pos)
+  min_dist <- min(dists)
+  
+  # Return gene with minimum distance
+  return(gff_df$ID[which.min(dists)])
+  
+}
+  
+  nearest_gene_v <- nearest_gene_list %>% unlist()
+  
+  motif_df <- motif_df %>% mutate(nearest_gene = nearest_gene_v)
+
+  # Stop the cluster
+  stopCluster(cl)
+  
+  return(motif_df)
+}
+
+
+# tic()
+# find_nearest_neighbor_parallel(motif_df = motif_data_list$chr_2, 
+#                                gff_df = mm_genome_df_list$chr_2)
+# toc()
+
+chr_names <- gff_files_list %>% str_extract(pattern = "chr_[0-9][0-9]|chr_[0-9]|chr_[A-Z]")
+
+
+tic()
+motif_data_list <- purrr::map(seq_along(chr_names), function(i){
+  find_nearest_neighbor_parallel(motif_df = motif_data_list[[chr_names[i]]], 
+                                 gff_df = human_genome_df_list[[chr_names[i]]])
+})
+toc()
+
+motif_data_list <- motif_data_list %>% purrr::set_names(chr_names)
+
+motif_data_list %>% qs::qsave(file = paste0(path_to_data, "human_ER1_motif_data_list_with_overlaps_and_nearest_neighbours.qs"), nthreads = 50)
+
+motif_data_list <- qs::qread(file = paste0(path_to_data, "human_ER1_motif_data_list_with_overlaps_and_nearest_neighbours.qs"), nthreads = 50)
+
+motif_data_df <- motif_data_list %>% bind_rows(.id = "chromosome")
+
+motif_data_df %>% vroom::vroom_write(file = paste0(path_to_data, "human_ER1_motif_data_overlaps_nearest_neighbours.tsv"), delim = "\t")
+
+# motif_data_df %>% xlsx::write.xlsx(file = paste0(path_to_data, "human_ER1_motif_data_overlaps_nearest_neighbours.xlsx"))
+```
+

@@ -1,0 +1,1118 @@
+---
+title: "bulk_RNAseq_Olha_Pyko"
+author: "Carlos Eduardo Madureira Trufen"
+date: "2023-08-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+```{r}
+# library(biomaRt)
+library(clusterProfiler)
+library(cowplot)
+library(data.table)
+# library(DESeq2)
+library(edgeR)
+# library(GeneBook)
+library(ggeasy)
+library(ggfortify)
+library(ggwordcloud)
+library(KEGGREST)
+# library(mmtable2)
+library(msigdbr)
+library(org.Rn.eg.db)
+library(org.Mm.eg.db)
+library(patchwork)
+library(pathview)
+library(readr)
+library(readxl)
+library(RColorBrewer)
+library(RUVSeq)
+library(tictoc)
+library(tidyverse)
+library(VennDiagram)
+```
+
+# functions
+```{r}
+plot_heatmap_and_dendro <- function(df) {
+  
+  # Load required packages
+  library(ggdendro)
+  library(tidyverse)
+
+  sample_names <- names(df)
+  
+  # Calculate the dendrogram
+  dend <- df %>%
+    # column_to_rownames(var = "Gene") %>%
+    as.matrix() %>%
+    dist() %>%
+    hclust() %>%
+    as.dendrogram()
+  
+  dend_data <- dend %>% dendro_data()
+
+  # Setup the data for dendrogram segments to enable an inverted layout
+  segment_data <- with(
+    segment(dend_data),
+    data.frame(x = y, y = x, xend = yend, yend = xend)
+  )
+
+  # Use the dendrogram label data to position the gene labels
+  gene_pos_table <- with(
+    dend_data$labels,
+    data.frame(y_center = x, Gene = as.character(label), height = 1)
+  )
+
+  # Table to position the samples
+  sample_pos_table <- data.frame(Sample = sample_names) %>%
+    mutate(x_center = (1:nrow(.)), width = 1)
+
+  # Reshape the data for the heatmap
+  heatmap_data <- df %>%
+    rownames_to_column("Gene") %>%
+    gather(value = "expr", key = "Sample", -Gene) %>%
+    # reshape2::melt(value.name = "expr", varnames = c("Gene", "Sample")) %>%
+    left_join(gene_pos_table) %>%
+    left_join(sample_pos_table)
+
+  # Determine the limits for the vertical axes
+  gene_axis_limits <- with(
+    gene_pos_table,
+    c(min(y_center - 0.5 * height), max(y_center + 0.5 * height))
+  ) +
+    0.1 * c(-1, 1) # extra spacing: 0.1
+
+  
+  max_expr <- max(abs(floor(min(heatmap_data$expr))), abs(ceiling(max(heatmap_data$expr))))
+  
+  # Heatmap plot
+  plt_hmap <- ggplot(
+    heatmap_data,
+    aes(
+      x = x_center, y = y_center, fill = expr,
+      height = height, width = width
+    )
+  ) +
+    geom_tile() +
+    # scale_fill_gradient2("Expr", high = "red", low = "blue") +
+    scale_fill_gradientn("log2FC", 
+                         limits = c(-1*max_expr, max_expr),
+                         colours = rev(colorRampPalette(colors = c("red", "white", "#094FED"))(50))) +
+    scale_x_continuous(
+      breaks = sample_pos_table$x_center,
+      labels = sample_pos_table$Sample,
+      expand = c(0, 0)
+    ) +
+    # For the y axis, alternatively set the labels as: gene_position_table$gene
+    scale_y_continuous(
+      breaks = gene_pos_table[, "y_center"],
+      # labels = rep("", nrow(gene_pos_table)),
+      labels = heatmap_data %>% arrange(y_center) %>% pull(Gene) %>% unique(),
+      limits = gene_axis_limits,
+      expand = c(0, 0),
+      position = "right"
+    ) +
+    labs(x = "Treatment", y = "") +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(size = rel(1), hjust = 0.5, angle = 0),
+      # margin: top, right, bottom, and left
+      plot.margin = unit(c(1, 0.2, 0.2, -0.7), "cm"),
+      panel.grid.minor = element_blank()
+    ) +
+    ggeasy::easy_all_text_size(size = 20) +
+    ggeasy::easy_y_axis_labels_size(size = 0) +
+    ggeasy::easy_rotate_x_labels(angle = 90)
+
+  # Dendrogram plot
+  plt_dendr <- ggplot(segment_data) +
+    geom_segment(aes(x = x, y = y, xend = xend, yend = yend)) +
+    scale_x_reverse(expand = c(0, 0.5)) +
+    scale_y_continuous(
+      breaks = gene_pos_table$y_center,
+      # labels = gene_pos_table$Gene,
+      labels = NULL,
+      limits = gene_axis_limits,
+      expand = c(0, 0)
+    ) +
+    labs(x = "Distance", y = "", colour = "", size = "") +
+    theme(panel.grid.minor = element_blank()) +
+    theme_bw() +
+    ggeasy::easy_all_text_size(size = 20)
+  
+  # Combine both plots horizontally and return the result
+  plot_grid(plt_dendr, plt_hmap, align = "h", rel_widths = c(0.4, 1))
+}
+
+```
+
+# ORA and GSEA custom functions
+```{r}
+ora_analysis <- function(genes_list, database = KEGG_2019_Human, pvalue_cutoff = 1, qvalue_cutoff = 1, p.adjust_cutoff = 0.1, count_at_least = 3) {
+  
+  # Load required packages
+  library(clusterProfiler)
+  library(tidyverse)
+  
+  # Read the GMT file into a data frame
+  gmt_df <- database %>% clusterProfiler::read.gmt()
+  
+  # Extract the gene sets (terms) from the GMT data frame
+  terms_list <- gmt_df %>%
+    split(f = .$term) %>%
+    purrr::map(pull, gene)
+  
+  # Get the unique set of genes present in the database
+  genes_set <- gmt_df[, "gene"] %>% unique()
+  
+  # Perform enrichment analysis for each gene set in the genes_list
+  enrichment_result <- genes_list %>%
+    purrr::map(clusterProfiler::enricher, pvalueCutoff = pvalue_cutoff, qvalueCutoff = qvalue_cutoff, universe = genes_set, TERM2GENE = gmt_df)
+  
+  # Combine the enrichment results into a single data frame
+  cl_prof_df <- enrichment_result %>%
+    purrr::map(as.data.frame) %>%
+    bind_rows(.id = "Cluster")
+  
+  # Filter the results based on p.adjust and count criteria
+  cl_prof_df <- cl_prof_df %>% dplyr::filter(p.adjust < p.adjust_cutoff & Count >= count_at_least)
+  
+  # Store the input gene clusters
+  geneClusters <- genes_list
+  
+  # Create a result object of class "compareClusterResult"
+  compareCluster_output <- new("compareClusterResult",
+    compareClusterResult = cl_prof_df,
+    geneClusters = list(geneClusters),
+    fun = "enricher",
+    .call = match.call(expand.dots = TRUE)
+  )
+  
+  # Return the result object
+  return(compareCluster_output)
+}
+
+shape_data <- function(ora_results_output) {
+  ora_results_output@compareClusterResult <- ora_results_output@compareClusterResult %>%
+    mutate_at(.vars = c("pvalue", "p.adjust", "qvalue"), .funs = formatC, digits = 2, format = "e")
+  return(ora_results_output)
+}
+
+gsea_analysis <- function(database = KEGG_2019_Mouse, sorted_genes, p_value_cutoff = 0.05, p_adjust_cutoff = 0.05, min_size = 10, max_size = 500, p_adjust_method = "BH") {
+  
+  # Load required packages
+  library(clusterProfiler)
+  library(tidyverse)
+
+  # Read the GMT file into a data frame
+  gmt_df <- database %>% clusterProfiler::read.gmt()
+
+  # Extract the gene sets (terms) from the GMT data frame
+  gmt_list <- gmt_df %>%
+    split(f = .$term) %>%
+    purrr::map(pull, gene)
+
+   # Perform Gene Set Enrichment Analysis (GSEA) using the sorted_genes and the database
+  gsea_result <- clusterProfiler::GSEA(
+    geneList = sorted_genes, 
+    TERM2GENE = gmt_df, 
+    verbose = FALSE, 
+    minGSSize = min_size, 
+    maxGSSize = max_size, 
+    pvalueCutoff = p_value_cutoff, 
+    pAdjustMethod = p_adjust_method
+    ) %>% suppressWarnings()
+
+  # Generate enrichment plots for each gene set and store them in a list
+  gseaplot_results <- purrr::map(gsea_result@result$Description, function(i) {
+    enrichplot::gseaplot2(
+      x = gsea_result,
+      geneSetID = i,
+      title = gsea_result@result$Description[i]
+    )
+  }) %>% purrr::set_names(gsea_result@result$Description)
+
+  # Store the GSEA results and the enrichment plot results in a list
+  results <- list(
+    gsea_results = gsea_result,
+    gseaplot_results = gseaplot_results
+  )
+
+  # Return the results
+  return(results)
+}
+
+
+  # fgsea_result_gseaResult <- new("gseaResult", 
+  #                              result = fgsea_result, # GSEA anaysis
+  #                              organism = "mmu", # organism
+  #                              setType = "KEGG", # setType
+  #                              geneSets = gmt_list, # geneSets
+  #                              geneList = sorted_genes, # order rank geneList
+  #                              keytype = "mgi_symbol", # ID type of gene
+  #                              permScores = matrix(0, 1, 2), # permutation scores
+  #                              params = list(pvalueCutoff = p_adjust_cutoff, # parameters
+  #                                           eps = 0,
+  #                                           pAdjustMethod ="BH",
+  #                                           exponent = 1,
+  #                                           minGSSize = 10,
+  #                                           maxGSSize = 500
+  #                                           ),
+  #                              gene2Symbol = "0", # gene ID to Symbol
+  #                              readable = FALSE, # whether convert gene ID to symbol
+  #                              termsim = matrix(0, 1, 2),
+  #                              method = "0",
+  #                              dr = list() # dimension reduction result
+  #                              )
+
+```
+
+# path_to_data
+```{r}
+# path_to_data <- "/media/carlos/HD_10_TB/bulk_RNAseq_Daniel_Kraus/"
+# path_to_data <- "/run/user/1002/gvfs/smb-share:server=primus.img.cas.cz,share=data/83_BIOINFORMATICS/Kadu/bulk_RNAseq_Daniel_Kraus/"
+path_to_data <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/bulk_RNAseq_Olha_Pyko/"
+```
+
+# Count table
+```{r}
+hisat2_count_table <- vroom::vroom(paste0(path_to_data, "featureCounts_output/mouse_hisat2_featurecounts_primary_table.txt"), delim = "\t", col_names = TRUE, skip = 1)
+# bowtie2_count_table <- vroom::vroom(paste0(path_to_data, "featureCounts_output/mouse_bowtie2_featurecounts_primary_table.txt"), delim = "\t", col_names = TRUE, skip = 1)
+
+count_table <- hisat2_count_table
+# count_table <- bowtie2_count_table
+
+count_table <- count_table %>% purrr::set_names("mgi_symbol", "chromosome", "start", "end", "strand", "length", 
+                                             "MG_28_WT_rep1", "MG_28_WT_rep2", "MG_28_WT_rep3", "MG_28_WT_rep4", 
+                                             "MG_31_rep1", "MG_31_rep2", "MG_31_rep3", "MG_31_rep4", 
+                                             "MG_32_HOM_rep1", "MG_32_HOM_rep2", "MG_32_HOM_rep3", "MG_32_HOM_rep4",
+                                             "MG_50_rep1", "MG_50_rep2", "MG_50_rep3", "MG_50_rep4", 
+                                             "MG_60_WT_rep1", "MG_60_WT_rep2", "MG_60_WT_rep3", "MG_60_WT_rep4", 
+                                             "MG_61_HOM_rep1", "MG_61_HOM_rep2", "MG_61_HOM_rep3", "MG_61_HOM_rep4", 
+                                             "UT_22_WT_rep1", "UT_22_WT_rep2", "UT_22_WT_rep3", "UT_22_WT_rep4", 
+                                             "UT_28_WT_rep1", "UT_28_WT_rep2", "UT_28_WT_rep3", "UT_28_WT_rep4",
+                                             "UT_31_HOM_rep1", "UT_31_HOM_rep2", "UT_31_HOM_rep3", "UT_31_HOM_rep4", 
+                                             "UT_32_HOM_rep1", "UT_32_HOM_rep2", "UT_32_HOM_rep3", "UT_32_HOM_rep4", 
+                                             "UT_60_WT_rep1", "UT_60_WT_rep2", "UT_60_WT_rep3", "UT_60_WT_rep4",
+                                             "UT_61_HOM_rep1", "UT_61_HOM_rep2", "UT_61_HOM_rep3", "UT_61_HOM_rep4"
+                                             )
+
+count_table <- count_table %>% 
+  dplyr::select(-c("chromosome", "start", "end", "strand", "length")) %>% 
+  column_to_rownames(var = "mgi_symbol")
+
+count_table <- count_table %>%
+  dplyr::select(str_which(string = names(count_table), pattern = "UT")) %>%
+  rownames_to_column(var = "gene") %>%
+  pivot_longer(cols = 2:25, names_to = "sample_rep", values_to = "read_count") %>%
+  mutate(sample = sample_rep %>% str_remove(pattern = "_rep.*")) %>%
+  group_by(gene, sample) %>%
+  summarize(average_count = mean(read_count) %>% round()) %>%
+  pivot_wider(names_from = "sample", values_from = "average_count") %>%
+  column_to_rownames(var = "gene") %>%
+  dplyr::select("UT_22_WT", "UT_28_WT", "UT_60_WT", "UT_31_HOM", "UT_32_HOM", "UT_61_HOM") %>%
+  purrr::set_names(paste0("UT_WT_", 1:3), paste0("UT_HOM_", 1:3))
+
+# count_table <- count_table %>%
+#   dplyr::select(colnames(.) %>% str_which(pattern = "UT_22_WT|UT_28_WT|UT_60_WT|UT_31_HOM|UT_32_HOM|UT_61_HOM")) %>% 
+#   purrr::set_names(paste0("UT_WT_", 1:12), paste0("UT_HOM_", 1:12))
+```
+
+# Mouse Id dictionaries
+```{r}
+# mart <- useEnsembl('genes'); listDatasets(mart)
+# 
+# ensembl <- useEnsembl(biomart = "ensembl", dataset = 'mmusculus_gene_ensembl')
+# listAttributes(mart = ensembl)
+# 
+# mart <- useMart("ensembl")
+# ensembl <- useDataset("mmusculus_gene_ensembl", mart = mart)
+# filters <- listFilters(ensembl)
+# attributes <- listAttributes(ensembl)
+# mouse_gene_id_dict <- getBM(attributes = c("ensembl_gene_id", "entrezgene_id", "mgi_symbol", "description", "gene_biotype", "chromosome_name", "start_position", "end_position", "strand"), filters = "mgi_symbol", values = rownames(count_table), mart = ensembl)
+# 
+# mouse_gene_id_dict %>% vroom::vroom_write(paste0(path_to_data, "mouse_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+
+mouse_gene_id_dict <- vroom::vroom(paste0(path_to_data, "mouse_gene_id_dict.tsv"), delim = "\t", col_names = TRUE)
+
+mouse_gene_id_dict <- mouse_gene_id_dict %>% 
+  mutate(strand = strand %>% str_replace_all(pattern = "-1", replacement = "-")) %>% 
+  mutate(strand = strand %>% str_replace_all(pattern = "1", replacement = "+"))
+```
+
+# Design
+```{r }
+# design_df <- data.frame(row.names = colnames(count_table), 
+#                          condition = rep(c("MG_28_WT", "MG_31", "MG_32_HOM", "MG_50", 
+#                                            "MG_60_WT", "MG_61_HOM", "UT_22_WT", "UT_28_WT", 
+#                                            "UT_31_HOM", "UT_32_HOM", "UT_60_WT", "UT_61_HOM"), each = 4))
+
+design_df <- data.frame(sample = colnames(count_table), 
+                         condition = rep(c("UT_WT", "UT_HOM"), each = 3))
+
+group <- design_df$condition %>% as.factor()
+design <- model.matrix(~ 0 + group)
+colnames(design) <- group %>% levels()
+rownames(design) <- count_table %>% colnames()
+```
+
+# Number of counts per sample
+```{r}
+sum_data <- data.frame(Counts = c(count_table %>% colSums() %>% mean(), (apply(count_table, MARGIN = 2, FUN = sum))))
+sum_data <- sum_data %>% mutate(Samples = c("Average", count_table %>% colnames()))
+
+n_colors <- design_df$condition %>% unique() %>% length()
+
+col_cell <- colorRampPalette(brewer.pal(8, "Dark2"))(n_colors)[design_df$condition %>% as.factor()]
+
+par(mar = c(6, 6, 3, 3))
+n_counts_per_sample_figure <- sum_data %>%
+  ggplot(aes(x = Samples, y = Counts, fill = Samples)) +
+  geom_bar(colour = "black", stat = "identity", fill = c("yellow", col_cell)) +
+  geom_hline(mapping = NULL, data = NULL, yintercept = 4e+06, na.rm = FALSE, show.legend = NA, colour = "black") +
+  theme_bw() +
+  scale_x_discrete(limits = sum_data$Samples
+                   # labels = c("Average", rep(" ", nrow(sum_data) - 1))
+                   ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  # theme(axis.text.x = element_blank()) 
+  easy_x_axis_title_size(size = 20) +
+  easy_y_axis_title_size(size = 20)
+
+# n_counts_per_sample_figure %>% ggsave(filename = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/n_counts_per_sample_figure.tiff"), device = "tiff", height = 7, width = 12)
+
+# n_counts_per_sample_figure %>% ggsave(filename = "/media/carlos/HD_10_TB/Physiology_Institute_RNA_Seq/n_counts_per_sample_figure.jpeg"), device = "jpeg", height = 7, width = 12)
+
+# n_counts_per_sample_figure %>% ggsave(filename = paste0(path_to_data, "n_counts_per_sample_figure.png"), device = "png", height = 7, width = 12)
+```
+
+# Mouse - Filter genes 
+# Need a CPM greater than 1 in 4 or more samples to keep
+```{r }
+dge_list <- count_table %>% DGEList(lib.size = colSums(count_table), group = group)
+# keep <- rowSums(d %>% cpm() > 1) >= 1
+keep <- rowSums(dge_list %>% cpm() > 1) >= 3
+filtered <- dge_list[keep, ]
+keep %>% summary()
+filtered %>% dim()
+
+filtered_count_data <- filtered$counts
+```
+
+# Batch effect removal
+# Least significantly DE genes based on a first-pass DE analysis performed prior to RUVg normalization.
+```{r }
+fit <- filtered_count_data %>%
+  DGEList(lib.size = colSums(filtered_count_data), group = group) %>%
+  calcNormFactors(method = "TMM") %>%
+  estimateDisp(design = design, tagwise = TRUE, robust = TRUE) %>%
+  glmFit(design)
+
+lrt <- fit %>% glmLRT(coef = 1)
+
+top <- topTags(lrt, n = nrow(dge_list))$table
+
+# Here, we consider all but the top 500 genes as ranked by edgeR p-values
+empirical <- rownames(filtered_count_data)[which(!(rownames(filtered_count_data) %in% rownames(top)[1:2000]))]
+```
+
+
+# The RUVg function  returns  two  pieces  of  information:
+# the estimated factors of unwanted variation nd the normalized counts obtained by regressing the original counts on the unwanted factors
+# The normalized values are stored in the normalizedCounts slot
+```{r }
+set2 <- fit$counts %>%
+  as.matrix() %>%
+  RUVg(empirical, k = 1)
+```
+
+# PlotRLE
+# plotRLE creates relative log expression (RLE) plot, initially proposed to measure the overall quality of a dataset
+# plotRLE can also be used to visualize the presence of unwanted batch effects in the data
+```{r, fig.width = 15, fig.height=6, dpi = 900}
+par(mfrow = c(1, 2), mar = c(8.1, 4.1, 4.1, 2.1))
+filtered_count_data %>% 
+  as.matrix() %>% 
+  cpm() %>%
+  plotRLE(outline = FALSE, ylim = c(-2.5, 2.5), col = col_cell, main = "Samples with \n unwanted variation", cex.main = 2, las = 2, cex.axis = 0.8, style = "full", outlier.alpha = 0.1, outlier.shape = 3, outlier.size = 0, legend = TRUE)
+# legend("topright", inset = c(0.0, 0), legend = group %>% levels(), col = col_cell %>% unique(), ncol = 2, cex = 0.5, border = "black", fill = col_cell %>% unique())
+mtext(side = 1, text = "Samples", line = 7, cex = 2)
+mtext(side = 2, text = "Relative Log Expression (RLE)", line = 1.5, cex = 2)
+
+set2$normalizedCounts %>%
+  plotRLE(outline = FALSE, ylim = c(-2.5, 2.5), col = col_cell, main = "Samples without \n unwanted variation", cex.main = 2, las = 2, cex.axis = 0.8, style = "full", outlier.alpha = 0.1, outlier.shape = 3, outlier.size = 0)
+legend("topright", inset = c(0.0, 0), legend = group %>% levels(), col = col_cell %>% unique(), ncol = 2, cex = 0.8, border = "black", fill = col_cell %>% unique())
+mtext(side = 1, text = "Samples", line = 7, cex = 2)
+# mtext(side = 2, text = "Relative Log Expression (RLE)", line = 1.5, cex = 2)
+```
+
+# PCAs 
+```{r}
+pca_res <- filtered_count_data %>% t() %>% prcomp(scale. = TRUE) 
+
+pca_res$x %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample") %>% 
+  mutate(group = rep(c("UT_WT", "UT_HOM"), each = 12)) %>% 
+  ggplot(aes(x = PC1, y = PC2, color = group)) +
+  geom_point() +
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() +
+  ggeasy::easy_all_text_size(size = 20)
+
+# pca_ruv <- set2$normalizedCounts %>% t() %>% prcomp(scale. = TRUE) 
+# 
+# pca_ruv$x %>% 
+#   as.data.frame() %>% 
+#   rownames_to_column(var = "sample") %>% 
+#   mutate(group = rep(c("INT_WT", "INT_KO", "MES_WT", "MES_KO"), each = 4)) %>% 
+#   ggplot(aes(x = PC1, y = PC2, color = group)) +
+#   geom_point() +
+#   scale_color_brewer(palette = "Dark2") +
+#   theme_bw() +
+#   ggeasy::easy_all_text_size(size = 20)
+```
+
+
+
+
+# DE analysis
+```{r, message=FALSE}
+threshold <- 0.05
+LFC <- 1
+n_sets <- 1
+
+comparisons <- c("WTxHOM")
+
+contr_matrix <- makeContrasts(
+  con1 = UT_HOM - UT_WT,
+  levels = c("UT_WT", "UT_HOM")
+)
+
+# edgeR pipeline
+fit <- filtered_count_data %>%
+  DGEList(lib.size = colSums(filtered_count_data), group = group) %>%
+  calcNormFactors("TMM") %>%
+  estimateDisp(design, robust = TRUE) %>%
+  glmFit(design)
+
+rownames(fit$counts) <- filtered_count_data %>% rownames()
+
+lrt1 <- purrr::map(seq_len(n_sets), function(i) glmLRT(fit, contrast = contr_matrix[, i]))
+
+edgeR_results <- purrr::map(seq_along(lrt1), function(i) topTags(lrt1[[i]], n = nrow(lrt1[[i]]), sort.by = "p.value"))
+
+edgeR_results <- purrr::map(seq_along(lrt1), function(i) edgeR_results[[i]]$table) %>%
+  purrr::map(rownames_to_column, var = "mgi_symbol") %>%
+  purrr::map(mutate, pi_value = abs(logFC) * (-1) * log10(FDR)) %>%
+  purrr::map(dplyr::arrange, FDR)
+
+edgeR_results <- edgeR_results %>% 
+  purrr::map(mutate, up_down = dplyr::if_else(condition = logFC > 0, true = "up", false = "down"))
+
+edgeR_results <- edgeR_results %>%
+  purrr::map(left_join, mouse_gene_id_dict) %>% 
+  purrr::map(dplyr::select, c(ensembl_gene_id, entrezgene_id, mgi_symbol, gene_biotype), everything()) %>% 
+  purrr::map(dplyr::distinct, ensembl_gene_id, .keep_all = TRUE) %>% 
+  purrr::set_names(comparisons)
+
+edgeR_results <- edgeR_results %>% 
+  purrr::map(mutate, DEG_status = dplyr::if_else(condition = logFC > 1 & FDR < 0.05, true = "Up", false = dplyr::if_else(condition = logFC < -1 & FDR < 0.05, true = "Down", false = "Not_DEG"))) 
+
+edgeR_results <- edgeR_results %>% 
+  purrr::map(mutate, length = end_position - start_position)
+
+edgeR_results <- edgeR_results %>% 
+  purrr::map(mutate, gene_biotype_1 = gene_biotype) %>% 
+  purrr::map(mutate, gene_biotype_1 = dplyr::if_else(gene_biotype_1 == "protein_coding", true = gene_biotype_1, false = dplyr::if_else(length < 200, true = "miRNA", false = "lncRNA")))
+
+edgeR_results <- edgeR_results %>% 
+  purrr::map(mutate_at, .vars = c("logFC", "logCPM", "LR", "pi_value"), .funs = round, digits = 2) %>% 
+  purrr::map(mutate_at, .vars = c("PValue", "FDR"), .funs = formatC, digits = 2, format = "e")
+
+edgeR_topDE_1 <- edgeR_results %>% purrr::map(dplyr::filter, as.numeric(FDR) < threshold)
+
+edgeR_topDE_2 <- edgeR_topDE_1 %>% purrr::map(filter, abs(logFC) >= LFC)
+
+edgeR_topDE_2$WTxHOM %>% dplyr::filter(logFC > 0) %>% pull(mgi_symbol) %>% length()
+edgeR_topDE_2$WTxHOM %>% dplyr::filter(logFC < 0) %>% pull(mgi_symbol) %>% length()
+
+edgeR_DE_names <- edgeR_topDE_2 %>%
+  purrr::map(dplyr::select, mgi_symbol) %>%
+  purrr::map(pull) %>% 
+  purrr::map(sort)
+
+edgeR_n_DEGs <- edgeR_DE_names %>% purrr::map(length)
+
+edgeR_topDE_2$WTxHOM %>%
+  dplyr::select(ensembl_gene_id, mgi_symbol, logFC, FDR, description) %>%
+  arrange(desc(logFC)) %>%
+  write.table(file = paste0(path_to_data, "/DEGs_LFC_table_WT_x_HOM.tsv"), sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+```
+
+
+```{r}
+KEGG_2019_Mouse <- paste0(path_to_gmt, "KEGG_2019_Mouse.txt") # KEGG_2019_Mouse gene sets
+
+threshold_seq <- seq(0.05, .10, by = 0.01)
+LFC <- 0.9
+
+DEG_by_threshold <- purrr::map(seq_along(threshold_seq), function(i) {
+  edgeR_DE_names <- edgeR_results$WTxHOM %>% 
+    dplyr::filter(as.numeric(FDR) < threshold_seq[i]) %>% 
+    dplyr::filter(abs(logFC) >= LFC) %>% 
+    dplyr::select(mgi_symbol) %>%
+    pull() %>%
+    sort() %>%
+    str_to_upper()
+  }) %>% purrr::set_names(threshold_seq)
+
+ora_KEGG_by_threshold_result <- DEG_by_threshold %>% ora_analysis(database = KEGG_2019_Mouse)
+ora_KEGG_by_threshold_result %>% dotplot()
+```
+
+# GO BP
+```{r}
+
+threshold_seq <- seq(0.05, .10, by = 0.01)
+LFC <- 1
+
+DEG_by_threshold <- purrr::map(seq_along(threshold_seq), function(i) {
+  edgeR_DE_names <- edgeR_results$WTxHOM %>% 
+    dplyr::filter(as.numeric(FDR) < threshold_seq[i]) %>% 
+    dplyr::filter(abs(logFC) >= LFC) %>% 
+    dplyr::select(mgi_symbol) %>%
+    pull() %>%
+    sort() %>%
+    str_to_upper()
+  }) %>% purrr::set_names(threshold_seq)
+
+ora_GO_BP_by_threshold_result <- DEG_by_threshold %>% ora_analysis(database = GO_Biological_Process_2021)
+ora_GO_BP_by_threshold_result %>% dotplot()
+```
+
+# GO MF
+```{r}
+
+threshold_seq <- seq(0.05, .10, by = 0.01)
+LFC <- 1
+
+DEG_by_threshold <- purrr::map(seq_along(threshold_seq), function(i) {
+  edgeR_DE_names <- edgeR_results$WTxHOM %>% 
+    dplyr::filter(as.numeric(FDR) < threshold_seq[i]) %>% 
+    dplyr::filter(abs(logFC) >= LFC) %>% 
+    dplyr::select(mgi_symbol) %>%
+    pull() %>%
+    sort() %>%
+    str_to_upper()
+  }) %>% purrr::set_names(threshold_seq)
+
+ora_GO_MF_by_threshold_result <- DEG_by_threshold %>% ora_analysis(database = GO_Molecular_Function_2021)
+ora_GO_MF_by_threshold_result %>% dotplot()
+```
+
+
+```{r}
+gene_set <- edgeR_results$WTxHOM %>% pull(mgi_symbol) %>% unique() %>% sort()
+# gene_set <- edgeR_topDE_2$WTxHOM %>% pull(mgi_symbol) %>% unique() %>% sort()
+
+gene_table_2_boxplot <- filtered_count_data %>%
+  # edgeR::cpm() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "mgi_symbol") %>%
+  left_join(mouse_gene_id_dict, by = "mgi_symbol") %>%
+  mutate(gene_info = paste0(mgi_symbol, "\n (", description, ")" )) %>%
+  pivot_longer(cols = `UT_WT_1`:`UT_HOM_3`, names_to = "sample", values_to = "read_count") %>%
+  full_join(design_df, by = "sample") %>%
+  dplyr::select(gene_info, sample, condition, read_count) %>%
+  mutate(condition = condition %>% factor(levels = c("UT_WT", "UT_HOM")))
+
+gene_title <- gene_table_2_boxplot %>%
+  dplyr::filter(gene_info %>% str_detect(pattern = paste(gene_set, collapse = "|"))) %>%
+  pull(gene_info) %>%
+  unique() %>% 
+  sort()
+
+i <- 166
+i <- gene_set %>% str_which(pattern = "Sesn1")
+i <- gene_set %>% str_which(pattern = "Ifnar2")
+
+"ACACA"/"APOC3"/"FASN"/"THRSP"
+gene_boxplot_list <- purrr::map(seq_along(gene_title), function(i){
+  print(i)
+  gene_table_2_boxplot %>%
+    dplyr::filter(gene_info == gene_title[i]) %>%
+    ggplot(aes(x = condition, y = read_count, fill = condition)) +
+    geom_boxplot(width = 1/5) +
+    geom_point(aes(fill = condition)) +
+    scale_fill_brewer(palette = "Set3") +
+    # labs(x = "", y = "Normalized read count (CPM)", title = gene_title[i]) +
+    labs(x = "", y = "Raw read count", title = gene_title[i]) +
+    theme_bw() +
+    ggeasy::easy_all_text_size(size = 20)
+}) %>%
+  purrr::set_names(gene_title)
+
+# purrr::map(seq_along(gene_boxplot_list), function(i) {
+#   print(i)
+#   gene_boxplot_list[[i]] %>% ggsave(filename = paste0("~/PRIMUS/data/83_BIOINFORMATICS/Kadu/bulk_RNAseq_Olha_Pyko/boxplots/DEG_raw_boxplots/", gene_title[i], "_raw_boxplot.png"), width = 12, height = 7, dpi = 900)
+#   })
+
+```
+
+
+# Databases
+```{r}
+# path_to_gmt <- "C:/Users/Carlos/Dropbox/GMT/"
+# path_to_gmt <- "~/Dropbox/GMT/"
+path_to_gmt <- "~/PRIMUS/data/83_BIOINFORMATICS/Kadu/GMT/"
+WikiPathways_2019_Mouse <- paste0(path_to_gmt, "WikiPathways_2019_Mouse.txt") # WikiPathways_2019_Mouse gene sets
+KEGG_2019_Mouse <- paste0(path_to_gmt, "KEGG_2019_Mouse.txt") # KEGG_2019_Mouse gene sets
+Reactome_2016 <- paste0(path_to_gmt, "Reactome_2016.txt") # Reactome_2016 gene sets
+GO_Molecular_Function_2018 <- paste0(path_to_gmt, "GO_Molecular_Function_2018.txt") # GO_Molecular_Function_2018 gene sets
+GO_Cellular_Component_2018 <- paste0(path_to_gmt, "GO_Cellular_Component_2018.txt") # GO_Cellular_Component_2018 gene sets
+GO_Biological_Process_2018 <- paste0(path_to_gmt, "GO_Biological_Process_2018.txt") # GO_Biological_Process_2018 gene sets
+GO_Molecular_Function_2021 <- paste0(path_to_gmt, "GO_Molecular_Function_2021.txt") # GO_Molecular_Function_2021 gene sets
+GO_Cellular_Component_2021 <- paste0(path_to_gmt, "GO_Cellular_Component_2021.txt") # GO_Cellular_Component_2021 gene sets
+GO_Biological_Process_2021 <- paste0(path_to_gmt, "GO_Biological_Process_2021.txt") # GO_Biological_Process_2021 gene sets
+```
+
+```{r}
+gsea_analysis <- function(database = KEGG_2019_Mouse, sorted_genes, p_value_cutoff = 0.05, p_adjust_cutoff = 0.05, min_size = 10, max_size = 500, p_adjust_method = "BH") {
+  
+  # Load required packages
+  library(clusterProfiler)
+  library(tidyverse)
+
+  # Read the GMT file into a data frame
+  gmt_df <- database %>% clusterProfiler::read.gmt()
+
+  # Extract the gene sets (terms) from the GMT data frame
+  gmt_list <- gmt_df %>%
+    split(f = .$term) %>%
+    purrr::map(pull, gene)
+
+   # Perform Gene Set Enrichment Analysis (GSEA) using the sorted_genes and the database
+  gsea_result <- clusterProfiler::GSEA(
+    geneList = sorted_genes, 
+    TERM2GENE = gmt_df, 
+    verbose = FALSE, 
+    minGSSize = min_size, 
+    maxGSSize = max_size, 
+    pvalueCutoff = p_value_cutoff, 
+    pAdjustMethod = p_adjust_method
+    ) %>% suppressWarnings()
+
+  # Generate enrichment plots for each gene set and store them in a list
+  gseaplot_results <- purrr::map(gsea_result@result$Description, function(i) {
+    enrichplot::gseaplot2(
+      x = gsea_result,
+      geneSetID = i,
+      title = gsea_result@result$Description[i]
+    )
+  }) %>% purrr::set_names(gsea_result@result$Description)
+
+  # Store the GSEA results and the enrichment plot results in a list
+  results <- list(
+    gsea_results = gsea_result,
+    gseaplot_results = gseaplot_results
+  )
+
+  # Return the results
+  return(results)
+}
+
+gene_list <- edgeR_results %>% 
+  purrr::map(function(x) x %>% 
+               arrange(desc(as.numeric(logFC))) %>% 
+               # distinct(entrezgene_id, .keep_all = TRUE) %>%
+               distinct(mgi_symbol, .keep_all = TRUE) %>% 
+               mutate(rank = rank(logFC, ties.method = "random"), 
+                      mgi_symbol = mgi_symbol %>% str_to_upper) %>% 
+               arrange(desc(rank)) %>%
+               dplyr::select(mgi_symbol, logFC)
+  )
+
+ranked_gene_list <- purrr::map(seq_along(gene_list), function(i) gene_list[[i]] %>% 
+  pull(as.numeric(logFC)) %>%
+  purrr::set_names(gene_list[[i]]$mgi_symbol)) %>%
+  purrr::set_names(names(edgeR_results))
+
+gsea_KEGG_results_list <- purrr::map(seq_along(ranked_gene_list), function(i) gsea_analysis(database = KEGG_2019_Mouse, sorted_genes = ranked_gene_list[[i]], p_value_cutoff = 0.05, p_adjust_cutoff = 0.05, min_size = 10, max_size = 500, p_adjust_method = "BH")) %>% purrr::set_names(names(edgeR_results))
+
+# gsea_KEGG_results_list$WTxHOM$gsea_results@result %>%
+#   mutate_at(.vars = c("enrichmentScore", "NES"), .funs = round, digits = 2) %>%
+#   mutate_at(.vars = c("pvalue", "p.adjust", "qvalue"), .funs = formatC, digits = 2, format = "e") %>%
+#   dplyr::select(-c(ID)) %>%
+#   vroom::vroom_write(file = paste0(path_to_data, "gsea_KEGG_results.csv"), delim = ",")
+
+# Heatmap
+Progesterone_mediated_oocyte_maturation_genes <- KEGG_2019_Mouse %>% 
+  clusterProfiler::read.gmt() %>% 
+  dplyr::filter(term == "Progesterone-mediated oocyte maturation") %>% 
+  pull(gene) %>% 
+  str_to_title() %>% 
+  sort()
+
+heatmap_df_1 <- filtered_count_data %>% 
+  cpm() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene") %>% 
+  dplyr::filter(Gene %in% Progesterone_mediated_oocyte_maturation_genes) %>% 
+  pivot_longer(cols = UT_WT_1:UT_HOM_12, names_to = "sample", values_to = "read_count")
+
+max_expr <- max(abs(min(heatmap_df_1$read_count, na.rm = TRUE)), max(heatmap_df_1$read_count, na.rm = TRUE))
+
+heatmap_df_1 %>% 
+  ggplot(aes(x = sample, y = Gene)) + 
+  geom_tile(aes(fill = read_count)) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", limits = c(0, max_expr)) +
+  labs(x = "Sample", y = "Gene")
+
+
+Oocyte_meiosis_genes <- KEGG_2019_Mouse %>% 
+  clusterProfiler::read.gmt() %>% 
+  dplyr::filter(term == "Oocyte meiosis") %>% 
+  pull(gene) %>% 
+  str_to_title() %>% 
+  sort()
+
+heatmap_df_2 <- filtered_count_data %>% 
+  cpm() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene") %>% 
+  dplyr::filter(Gene %in% Oocyte_meiosis_genes) %>% 
+  pivot_longer(cols = UT_WT_1:UT_HOM_12, names_to = "sample", values_to = "read_count")
+
+max_expr <- max(abs(min(heatmap_df_2$read_count, na.rm = TRUE)), max(heatmap_df_2$read_count, na.rm = TRUE))
+
+heatmap_df_2 %>% 
+  ggplot(aes(x = sample, y = Gene)) + 
+  geom_tile(aes(fill = read_count)) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", limits = c(0, max_expr)) +
+  labs(x = "Sample", y = "Gene")
+
+Fat_digestion_and_absorption_genes <- KEGG_2019_Mouse %>% 
+  clusterProfiler::read.gmt() %>% 
+  dplyr::filter(term == "Fat digestion and absorption") %>% 
+  pull(gene) %>% 
+  str_to_title() %>% 
+  sort()
+
+Fat_digestion_and_absorption_genes <- gsea_KEGG_results_list$WTxHOM$gsea_results@result %>% 
+  dplyr::filter(ID == "Fat digestion and absorption") %>% 
+  pull(core_enrichment) %>% 
+  str_split("/") %>% 
+  unlist() %>% 
+  str_to_title() %>% 
+  sort()
+
+heatmap_df_3 <- filtered_count_data %>% 
+  cpm() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene") %>% 
+  dplyr::filter(Gene %in% Fat_digestion_and_absorption_genes) %>% 
+  pivot_longer(cols = UT_WT_1:UT_HOM_3, names_to = "sample", values_to = "read_count")
+
+max_expr <- max(abs(min(heatmap_df_3$read_count, na.rm = TRUE)), max(heatmap_df_3$read_count, na.rm = TRUE))
+
+heatmap_df_3 %>% 
+  ggplot(aes(x = sample, y = Gene)) + 
+  geom_tile(aes(fill = read_count)) +
+  scale_fill_gradient(low = "white", high = "violet", limits = c(0, max_expr)) +
+  labs(x = "Sample", y = "Gene")
+
+# gsea_plot_list <- purrr::map(1:4, function(i){
+#   enrichplot::gseaplot2(x = gsea_KEGG_results_list$TNFxCTRL$gsea_results,
+#                       geneSetID = i,
+#                       title = gsea_KEGG_results_list$TNFxCTRL$gsea_results@result$Description[i],
+#                       base_size = 8
+#                       ) 
+#   })
+
+# aplot::plot_list(gglist = gsea_plot_list, ncol = 2, labels = c("A", "B", "C", "D")) %>% 
+#   aplot::ggsave(filename = paste0(path_to_files, "GSEA_top4.png"), width = 10, height = 10, dpi = 900)
+# aplot::plot_list(gglist = gsea_plot_list, ncol = 2, labels = c("A", "B", "C", "D")) %>% 
+#   aplot::ggsave(filename = paste0(path_to_files, "GSEA_top4.tiff"), width = 10, height = 10, dpi = 900)
+
+
+gsea_GO_BP_results_list <- purrr::map(seq_along(ranked_gene_list), function(i) gsea_analysis(database = GO_Biological_Process_2021, sorted_genes = ranked_gene_list[[i]], p_value_cutoff = 0.05, p_adjust_cutoff = 0.05, min_size = 10, max_size = 500, p_adjust_method = "BH")) %>% purrr::set_names(names(edgeR_results))
+
+gsea_GO_BP_results_list$WTxHOM$gsea_results@result %>% 
+  mutate_at(.vars = c("enrichmentScore", "NES"), .funs = round, digits = 2) %>% 
+  mutate_at(.vars = c("pvalue", "p.adjust", "qvalue"), .funs = formatC, digits = 2, format = "e") %>% 
+  dplyr::select(-c(ID)) %>% 
+  vroom::vroom_write(file = paste0(path_to_data, "gsea_GO_BP_results.csv"), delim = ",")
+  
+
+gsea_GO_MF_results_list <- purrr::map(seq_along(ranked_gene_list), function(i) gsea_analysis(database = GO_Molecular_Function_2021, sorted_genes = ranked_gene_list[[i]], p_value_cutoff = 0.05, p_adjust_cutoff = 0.05, min_size = 10, max_size = 500, p_adjust_method = "BH")) %>% purrr::set_names(names(edgeR_results))
+
+gsea_GO_MF_results_list$WTxHOM$gsea_results@result %>% 
+  mutate_at(.vars = c("enrichmentScore", "NES"), .funs = round, digits = 2) %>% 
+  mutate_at(.vars = c("pvalue", "p.adjust", "qvalue"), .funs = formatC, digits = 2, format = "e") %>% 
+  dplyr::select(-c(ID)) %>% 
+  vroom::vroom_write(file = paste0(path_to_data, "gsea_GO_MF_results.csv"), delim = ",")
+
+gsea_GO_CC_results_list <- purrr::map(seq_along(ranked_gene_list), function(i) gsea_analysis(database = GO_Cellular_Component_2021, sorted_genes = ranked_gene_list[[i]], p_value_cutoff = 0.05, p_adjust_cutoff = 0.05, min_size = 10, max_size = 500, p_adjust_method = "BH")) %>% purrr::set_names(names(edgeR_results))
+
+gsea_GO_CC_results_list$WTxHOM$gsea_results@result %>% 
+  mutate_at(.vars = c("enrichmentScore", "NES"), .funs = round, digits = 2) %>% 
+  mutate_at(.vars = c("pvalue", "p.adjust", "qvalue"), .funs = formatC, digits = 2, format = "e") %>% 
+  dplyr::select(-c(ID)) %>% 
+  vroom::vroom_write(file = paste0(path_to_data, "gsea_GO_CC_results.csv"), delim = ",")
+```
+
+
+
+
+# WGCNA
+
+# TMM normaliztion from edgeR
+```{r}
+# WGCNA_tpm_df <- set2$normalizedCounts %>%
+WGCNA_tpm_df <- filtered_count_data %>%  
+  DGEList(lib.size = filtered_count_data %>% colSums(), group = group) %>%
+  calcNormFactors("TMM") %>%
+  cpm(normalized.lib.sizes = TRUE) %>%
+  as.data.frame()
+
+WGCNA_tpm_df %>% head()
+```
+
+# functions to calculate the optimized number of clusters (elbow on WSS)
+```{r}
+calculate_TOM <- function(df){
+  
+  # Check input data
+  stopifnot(is.data.frame(df))
+  
+  # Load the required packages
+  library(tidyverse)
+  library(WGCNA)
+  # library(doParallel)  # Load the doParallel package
+  
+  # Register parallel backend
+  # cl <- parallel::detectCores() - 1
+  # registerDoParallel(cores = cl)
+  
+  # Scale data
+  dat_expr <- df %>%
+    t() %>%
+    as.data.frame() %>%
+    scale()
+  
+  # Build hierarchical clustering tree
+  sample_tree <- dat_expr %>%
+    dist() %>%
+    hclust(method = "average")
+  
+  # Determine soft power threshold
+  soft_threshold <- dat_expr %>% 
+    pickSoftThreshold(powerVector = c(c(2:10), seq(from = 12, to = 30, by = 2)), 
+                      verbose = 2, 
+                      moreNetworkConcepts = TRUE)
+  
+  soft_power <- soft_threshold$fitIndices %>%
+    filter(SFT.R.sq > 0.8) %>%
+    pull(Power) %>%
+    min()
+  if (is.na(soft_power | is.infinite(soft_power))) {soft_power <- 10}
+  
+  # Calculate TOM matrix
+  dat_expr <- dat_expr %>% apply(MARGIN = c(1, 2), FUN = as.numeric)
+  adjacency <- dat_expr %>% adjacency(power = soft_power)
+  TOM <- adjacency %>% TOMsimilarity()
+  rownames(TOM) <- colnames(TOM) <- df %>% rownames()
+  
+  # parallel::stopCluster(cl)
+  
+  return(TOM)
+}
+
+# TOM <- WGCNA_tpm_df %>% calculate_TOM()
+# 
+# minimum_cluster_size <- 1:50
+# minimum_cluster_depth <- 4
+
+calculate_ssd <- function(x) sum((x - mean(x))^2)
+
+get_cluster_summary <- function(minimum_cluster_size, TOM, minimum_cluster_depth = 4, number_of_cores = 6, ...) {
+  
+  # Check input data
+  stopifnot(is.numeric(minimum_cluster_size))
+  stopifnot(is.numeric(minimum_cluster_depth))
+  stopifnot(is.numeric(number_of_cores))
+  stopifnot(is.numeric(TOM))
+  
+  # Load the required packages
+  library(dynamicTreeCut)
+  library(foreach)
+  library(ggeasy)
+  
+  # Get gene names
+  gene_names <- TOM %>% rownames()
+  
+  # Initiate cluster
+  doParallel::registerDoParallel(cores = number_of_cores)
+  
+  # dissimilarity TOM
+  diss_TOM = 1 - TOM
+  
+  # estimate gene_tree
+  gene_tree <- diss_TOM %>% as.dist() %>% hclust(method = "average")
+  
+  # Compute dynamic cluster count
+  dynamic_cluster_list <- foreach(i = minimum_cluster_size) %dopar% 
+    dynamicTreeCut::cutreeDynamic(dendro = gene_tree, distM = diss_TOM, deepSplit = minimum_cluster_depth, pamRespectsDendro = FALSE, minClusterSize = i)
+
+  # Compute dynamic cluster count
+  dynamic_cluster_count <- dynamic_cluster_list %>% 
+    purrr::map(max) %>% 
+    unlist()
+  
+  # Compute module membership colors
+  module_membership_colors <- dynamic_cluster_list %>% purrr::map(labels2colors)
+  
+  # Compute module membership colors data frame
+  module_membership_colors_df <- foreach(i = seq_along(dynamic_cluster_list)) %dopar% 
+    data.frame(dynamic_colors = module_membership_colors[[i]], genes = gene_names)
+  
+  pre_cluster_blocks <- purrr::map(seq_along(module_membership_colors_df), function(i) {
+    module_membership_colors_df[[i]] %>% 
+      split(f = .$dynamic_colors) %>% 
+      purrr::map(dplyr::select, -dynamic_colors) %>% 
+      purrr::map(pull)
+    }
+)
+
+  in_cluster_membership <- purrr::map(seq_along(pre_cluster_blocks), function(i) purrr::map(seq_along(pre_cluster_blocks[[i]]), function(j) gene_names %in% pre_cluster_blocks[[i]][[j]]))
+  
+  # Select the corresponding Topological Overlap
+  cluster_TOM <- purrr::map(seq_along(in_cluster_membership), function(i) purrr::map(seq_along(in_cluster_membership[[i]]), function(j) TOM[in_cluster_membership[[i]][[j]], in_cluster_membership[[i]][[j]]]))
+  
+  sum_of_squared_differences <- purrr::map(seq_along(cluster_TOM), function(i) purrr::map(seq_along(cluster_TOM[[i]]), function(j) cluster_TOM[[i]][[j]] %>% calculate_ssd())) %>% purrr::map(unlist) %>% purrr::map(sum) %>% unlist()
+  
+  cluster_summary <- data.frame(minimum_n_genes = minimum_cluster_size, 
+                                n_modules = dynamic_cluster_count, 
+                                sum_of_squared_differences = sum_of_squared_differences)
+  parallelMap::parallelStop()
+  
+  return(cluster_summary)
+}
+
+# get_elbow_points_indices <- function(x, y, threshold) {
+#     first_derivative <- diff(y) / diff(x) 
+#     second_derivative <- diff(first_derivative) / diff(x[-1]) 
+#     indices <- which(abs(second_derivative) > threshold)
+#     return(indices)
+#   }
+  
+# https://stackoverflow.com/questions/41518870/finding-the-elbow-knee-in-a-curve
+# https://stackoverflow.com/questions/14351608/color-one-point-and-add-an-annotation-in-ggplot2
+determine_elbow_point <- function(cluster_summary_output, huge_jump_threshold = 1e3) {
+
+  # Extract n_modules and sum_of_squared_differences from cluster_summary_output$table
+  n_modules <- cluster_summary_output$n_modules
+  ssd <- cluster_summary_output$sum_of_squared_differences
+
+  # Approximate the points using linear interpolation
+  approximated_points <- approx(n_modules, ssd, n = 1000, yleft = min(ssd), yright = max(ssd))
+  approx_n_modules <- approximated_points$x
+  approx_ssd <- approximated_points$y
+
+  # Find the index of the elbow point (i.e., where the SSD curve starts to level off)
+  # threshold for huge jump = 1e4
+  # elbow_indices <- get_elbow_points_indices(approx_n_modules, approx_ssd, huge_jump_threshold) 
+  # elbow_module_index <- approx_n_modules[max(elbow_indices)] %>% ceiling()
+  first_derivative <- diff(approx_ssd) / diff(approx_n_modules) 
+  second_derivative <- diff(first_derivative) / diff(approx_n_modules[-1]) 
+  elbow_index <- which(abs(second_derivative) == max(abs(second_derivative)))
+  elbow_module_index <- approx_n_modules[elbow_index] %>% ceiling()
+
+  # Find the minimum module size corresponding to the elbow point
+  min_module_size <- cluster_summary_output %>%
+    dplyr::filter(n_modules == elbow_module_index) %>%
+    pull(minimum_n_genes)
+
+   # Set the "elbow" column in cluster_summary_output
+  cluster_summary_output <- cluster_summary_output %>% 
+    mutate(elbow = n_modules == elbow_module_index)
+
+  elbow_point <- cluster_summary_output %>% 
+    dplyr::filter(elbow == TRUE)
+  
+  # Generate a plot showing the SSD curve and the elbow point
+  elbow_plot <- cluster_summary_output %>% 
+    ggplot(aes(x = n_modules, y = sum_of_squared_differences)) + 
+    geom_line() + 
+    geom_point() + 
+    geom_point(data = elbow_point, color = "red") + 
+    theme_bw() +
+    labs(x = "Number of modules", y = "Sum of squared differences") +
+    ggeasy::easy_text_size(size = 20)
+
+  # Return a list containing the minimum module size and the elbow plot
+  return(list(min_module_size = min_module_size,
+                  elbow_plot = elbow_plot))
+}
+
+TOM <- WGCNA_tpm_df %>% calculate_TOM()
+minimum_cluster_size <- 1:50
+minimum_cluster_depth <- 4
+cluster_summary_output <- TOM %>% get_cluster_summary(minimum_cluster_size = 5:50, number_of_cores = 50)
+min_module_size_res <- cluster_summary_output %>% determine_elbow_point()
+
+min_module_size_res <- WGCNA_tpm_df %>% 
+  calculate_TOM() %>% 
+  get_cluster_summary(minimum_cluster_size = 5:50, number_of_cores = 50) %>% 
+  determine_elbow_point()
+
+min_module_size_res$elbow_plot %>% ggsave(file = paste0(path_to_files, "elbow_plot.png"), width = 7, height = 5, dpi = 900)
+```
+
+# CEMiTool
+```{r}
+library(CEMiTool)
+sample_annotation = data.frame(sample_name = rownames(design_df), class = design_df$condition)
+
+
+# WGCNA_tpm_df <- WGCNA_tpm_df %>% t() %>% as.data.frame()
+
+cem_object <- new_cem(expr = WGCNA_tpm_df, 
+                   sample_annot = sample_annotation,
+                   sample_name_column = "sample_name", 
+                   class_column = "class", 
+                   filter = FALSE, 
+                   apply_vst = FALSE)
+```
+
+```{r}
+cem_results <- find_modules(
+  cem = cem_object,
+  cor_method = "spearman",
+  cor_function = "cor",
+  eps = 0.1,
+  # min_ngen = min_module_size_res$min_module_size,
+  min_ngen = 10,
+  merge_similar = TRUE,
+  diss_thresh = 0.75,
+  network_type = "unsigned",
+  tom_type = "signed",
+  set_beta = NULL,
+  force_beta = TRUE,
+  verbose = TRUE
+)
+
+cem_results %>% qs::qsave(paste0(path_to_data, "cem_results.qs"), nthreads = 50)
+```
+
+
+
+
+
